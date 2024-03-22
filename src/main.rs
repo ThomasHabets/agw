@@ -1,4 +1,3 @@
-use core::str::from_utf8;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -57,26 +56,89 @@ fn unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Vec<u8> {
     v
 }
 
+fn parse_reply(header: &Header, data: &[u8]) {
+    match header.data_kind {
+        b'R' => {
+            let major = u16::from_le_bytes(data[0..2].try_into().unwrap());
+            let minor = u16::from_le_bytes(data[4..6].try_into().unwrap());
+            eprintln!("Version {}.{}", major, minor);
+        }
+        b'G' => {
+            eprintln!("Port info: {}", std::str::from_utf8(data).unwrap());
+        }
+        b'g' => {
+            let rate = data[0];
+            let traffic_level = data[1];
+            let tx_delay = data[2];
+            let tx_tail = data[3];
+            let persist = data[4];
+            let slot_time = data[5];
+            let max_frame = data[6];
+            let active_connections = data[7];
+            let bytes_per_2min = u32::from_le_bytes(data[8..12].try_into().unwrap());
+            eprintln!(
+                "Port caps:
+  rate={rate}
+  traffic={traffic_level}
+  txdelay={tx_delay}
+  txtail={tx_tail}
+  persist={persist}
+  slot_time={slot_time}
+  max_frame={max_frame}
+  active_connections={active_connections}
+  bytes_per_2min={bytes_per_2min}"
+            );
+        }
+        k => {
+            eprintln!("Unknown kind {}", k);
+            let mut stdout = std::io::stdout();
+            stdout.write(data).unwrap();
+            stdout.flush().unwrap();
+        }
+    };
+}
+
+struct Header {
+    port: u8,
+    data_kind: u8,
+    data_len: u32,
+}
+
+fn parse_header(header: &[u8]) -> Header {
+    if header.len() != 36 {
+        panic!();
+    }
+    Header {
+        port: header[0],
+        data_kind: header[4],
+        data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let mut stream = TcpStream::connect("127.0.0.1:8010")?;
 
     //let msg = version_info();
     //let msg = port_info();
-    //let msg = port_cap(0);
+    let msg = port_cap(0);
+
+    /*
     let src = make_call("M0THC-1").unwrap();
     let dst = make_call("APZ001").unwrap();
-
     let msg = unproto(0, 0xF0, &src, &dst, b":M6VMB-1  :helloworld{3");
+    */
     stream.write(&msg).unwrap();
-    eprintln!("Sent command!, awaiting reply...");
+    //eprintln!("Sent command!, awaiting reply...");
 
-    let mut data = [0 as u8; 1024];
-    let n = stream.read(&mut data)?;
+    let mut header = [0 as u8; 36];
+    stream.read_exact(&mut header)?;
+    let header = parse_header(&header);
 
-    if false {
-        let mut stdout = std::io::stdout();
-        stdout.write(&data[..n])?;
-        stdout.flush()?;
+    if header.data_len > 0 {
+        let mut payload = vec![0; header.data_len as usize];
+        stream.read_exact(&mut payload)?;
+        parse_reply(&header, &payload);
     }
+
     Ok(())
 }
