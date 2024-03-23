@@ -50,33 +50,62 @@ struct Call {
     bytes: [u8; 10],
 }
 
-fn parse_call(s: &str) -> Result<Call> {
-    let bytes = s.as_bytes();
-    if bytes.len() > 10 {
-        return Err(Error::msg(format!(
-            "callsign '{}' is longer than 10 characters",
-            s
-        )));
+impl Call {
+    fn parse(bytes: &[u8]) -> Call {
+        let mut arr = [0; 10];
+        for (i, &item) in bytes.iter().enumerate() {
+            arr[i] = item;
+        }
+        Call { bytes: arr }
+    }
+    fn from_str(s: &str) -> Result<Call> {
+        if s.len() > 10 {
+            return Err(Error::msg(format!(
+                "callsign '{}' is longer than 10 characters",
+                s
+            )));
+        }
+        let mut arr = [0; 10];
+        for (i, &item) in s.as_bytes().iter().enumerate() {
+            arr[i] = item;
+        }
+        Ok(Call { bytes: arr })
     }
 
-    let mut arr = [0; 10];
-    for (i, &item) in bytes.iter().enumerate() {
-        arr[i] = item;
+    fn is_empty(&self) -> bool {
+        for b in self.bytes {
+            if b != 0 {
+                return false;
+            }
+        }
+        true
     }
-
-    Ok(Call { bytes: arr })
 }
 
-fn parse_reply(header: &Header, data: &[u8]) {
-    match header.data_kind {
+enum Reply {
+    Version((u16, u16)),
+    PortInfo(String), // TODO: parse it
+    PortCaps(String), // TODO: parse it
+    Unknown,          // TODO: save it for debug printing
+}
+
+fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
+    // TODO: confirm data len, since most replies will have fixed size.
+    Ok(match header.data_kind {
         b'R' => {
-            let major = u16::from_le_bytes(data[0..2].try_into().unwrap());
-            let minor = u16::from_le_bytes(data[4..6].try_into().unwrap());
-            eprintln!("Version {}.{}", major, minor);
+            let major = u16::from_le_bytes(
+                data[0..2]
+                    .try_into()
+                    .expect("can't happen: two bytes can't be made into u16?"),
+            );
+            let minor = u16::from_le_bytes(
+                data[4..6]
+                    .try_into()
+                    .expect("can't happen: two bytes can't be made into u16?"),
+            );
+            Reply::Version((major, minor))
         }
-        b'G' => {
-            eprintln!("Port info: {}", std::str::from_utf8(data).unwrap());
-        }
+        b'G' => Reply::PortInfo(std::str::from_utf8(data)?.to_string()),
         b'g' => {
             let rate = data[0];
             let traffic_level = data[1];
@@ -87,9 +116,9 @@ fn parse_reply(header: &Header, data: &[u8]) {
             let max_frame = data[6];
             let active_connections = data[7];
             let bytes_per_2min = u32::from_le_bytes(data[8..12].try_into().unwrap());
-            eprintln!(
-                "Port caps:
-  rate={rate}
+
+            Reply::PortCaps(format![
+                "rate={rate}
   traffic={traffic_level}
   txdelay={tx_delay}
   txtail={tx_tail}
@@ -98,15 +127,16 @@ fn parse_reply(header: &Header, data: &[u8]) {
   max_frame={max_frame}
   active_connections={active_connections}
   bytes_per_2min={bytes_per_2min}"
-            );
+            ])
         }
         k => {
             eprintln!("Unknown kind {}", k);
             let mut stdout = std::io::stdout();
             stdout.write(data).unwrap();
             stdout.flush().unwrap();
+            Reply::Unknown
         }
-    };
+    })
 }
 
 struct Header {
@@ -136,6 +166,7 @@ impl Header {
             dst,
         }
     }
+
     fn serialize(&self) -> Result<Vec<u8>> {
         let mut v = vec![0; HEADER_LEN];
         v[0] = self.port;
@@ -153,17 +184,18 @@ impl Header {
     }
 }
 
-fn parse_header(header: &[u8]) -> Header {
-    if header.len() != HEADER_LEN {
-        panic!();
-    }
+fn parse_header(header: &[u8; HEADER_LEN]) -> Header {
+    let src = Call::parse(&header[8..18]);
+    let src = if src.is_empty() { None } else { Some(src) };
+    let dst = Call::parse(&header[18..28]);
+    let dst = if dst.is_empty() { None } else { Some(dst) };
     Header {
         port: header[0],
         data_kind: header[4],
+        pid: header[6],
+        src: src,
+        dst: dst,
         data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
-        src: None, // TODO
-        dst: None, // TODO
-        pid: 0,    // TODO
     }
 }
 
@@ -176,26 +208,38 @@ fn main() -> Result<()> {
         "version" => version_info(),
         "port_info" => port_info(),
         "port_cap" => port_cap(0),
-        "connect" => connect(0, 0, &parse_call("M0THC-1")?, &parse_call("M0THC-2")?)?,
+        "unproto" => unproto(
+            0,
+            0xF0,
+            &Call::from_str("M0THC-1")?,
+            &Call::from_str("APZ001")?,
+            b"hello world",
+        )?,
+        "connect" => connect(
+            0,
+            0,
+            &Call::from_str("M0THC-1")?,
+            &Call::from_str("M0THC-2")?,
+        )?,
         _ => panic!("unknown command"),
     };
 
-    /*
-    let src = make_call("M0THC-1").unwrap();
-    let dst = make_call("APZ001").unwrap();
-    let msg = unproto(0, 0xF0, &src, &dst, b":M6VMB-1  :helloworld{3");
-    */
-    stream.write(&msg).unwrap();
-    //eprintln!("Sent command!, awaiting reply...");
+    stream.write(&msg)?;
 
+    // Read reply
     let mut header = [0 as u8; HEADER_LEN];
     stream.read_exact(&mut header)?;
     let header = parse_header(&header);
-
     if header.data_len > 0 {
         let mut payload = vec![0; header.data_len as usize];
         stream.read_exact(&mut payload)?;
-        parse_reply(&header, &payload);
+        match parse_reply(&header, &payload) {
+            Ok(Reply::Version((maj, min))) => eprintln!("Version: {}.{}", maj, min),
+            Ok(Reply::PortInfo(s)) => eprintln!("Port info: {}", s),
+            Ok(Reply::PortCaps(s)) => eprintln!("Port caps: {}", s),
+            Ok(Reply::Unknown) => eprintln!("Unknown reply"),
+            Err(e) => eprintln!("Error parsing reply: {:?}", e),
+        }
     }
 
     Ok(())
