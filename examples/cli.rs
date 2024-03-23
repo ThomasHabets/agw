@@ -28,8 +28,8 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[clap(short)]
-    verbose: Option<usize>,
+    #[clap(short, default_value = "0")]
+    verbose: usize,
 
     #[clap(short = 'c', default_value = "127.0.0.1:8010")]
     agw_addr: String,
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         .module(module_path!())
         .module("agw")
         .quiet(false)
-        .verbosity(opt.verbose.unwrap_or(0))
+        .verbosity(opt.verbose)
         .timestamp(stderrlog::Timestamp::Second)
         .init()
         .unwrap();
