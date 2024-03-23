@@ -45,7 +45,7 @@ fn unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec
     Ok([h, data.to_vec()].concat())
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Call {
     bytes: [u8; 10],
 }
@@ -83,10 +83,45 @@ impl Call {
 }
 
 enum Reply {
-    Version((u16, u16)),
-    PortInfo(String), // TODO: parse it
-    PortCaps(String), // TODO: parse it
-    Unknown,          // TODO: save it for debug printing
+    // TODO: should these actually pick up the header value subset,
+    // too, when appropriate?
+    Version((u16, u16)),              // R.
+    CallsignRegistration(bool),       // X.
+    PortInfo(String),                 // G. TODO: parse
+    PortCaps(String),                 // g. TODO: parse
+    FramesOutstandingPort(u32),       // y.
+    FramesOutstandingConnection(u32), // Y.
+    HeardStations(String),            // H. TODO: parse
+    Connected(String),                // C.
+    ConnectedData(Vec<u8>),           // D.
+    MonitorConnected(Vec<u8>),        // I.
+    MonitorSupervisory(Vec<u8>),      // S.
+    Unproto(Vec<u8>),                 // U.
+    ConnectedSent(Vec<u8>),           // T.
+    Raw(Vec<u8>),                     // R.
+    Unknown(Header, Vec<u8>),
+}
+
+impl Reply {
+    fn description(&self) -> String {
+        match self {
+            Reply::ConnectedData(data) => format!("ConnectedData: {:?}", data),
+            Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
+            Reply::Unproto(data) => format!("Received unproto: {:?}", data),
+            Reply::PortInfo(s) => format!("Port info: {}", s),
+            Reply::PortCaps(s) => format!("Port caps: {}", s),
+            Reply::Connected(s) => format!("Connected: {}", s),
+            Reply::Version((maj, min)) => format!("Version: {maj}.{min}"),
+            Reply::Raw(data) => "Raw".to_string(),
+            Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
+            Reply::FramesOutstandingPort(n) => format!("Frames outstanding port: {n}"),
+            Reply::FramesOutstandingConnection(n) => format!("Frames outstanding connection: {n}"),
+            Reply::MonitorConnected(_) => format!("Connected packet"),
+            Reply::MonitorSupervisory(_) => format!("Supervisory packet"),
+            Reply::HeardStations(s) => format!("Heard stations: {s}"),
+            Reply::Unknown(h, data) => format!("Unknown reply: header={h:?} data={data:?}"),
+        }
+    }
 }
 
 fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
@@ -105,6 +140,11 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             );
             Reply::Version((major, minor))
         }
+        b'X' => Reply::CallsignRegistration(data[0] == 1),
+        b'C' => Reply::Connected(std::str::from_utf8(data)?.to_string()),
+        b'D' => Reply::ConnectedData(data.to_vec()),
+        b'T' => Reply::ConnectedSent(data.to_vec()),
+        b'U' => Reply::Unproto(data.to_vec()),
         b'G' => Reply::PortInfo(std::str::from_utf8(data)?.to_string()),
         b'g' => {
             let rate = data[0];
@@ -129,16 +169,24 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
   bytes_per_2min={bytes_per_2min}"
             ])
         }
+        b'y' => Reply::FramesOutstandingPort(u32::from_le_bytes(data[0..4].try_into().unwrap())),
+        b'Y' => {
+            Reply::FramesOutstandingConnection(u32::from_le_bytes(data[0..4].try_into().unwrap()))
+        }
+        b'H' => Reply::HeardStations(std::str::from_utf8(data)?.to_string()),
+        b'I' => Reply::MonitorConnected(data.to_vec()),
+        b'S' => Reply::MonitorSupervisory(data.to_vec()),
         k => {
             eprintln!("Unknown kind {}", k);
             let mut stdout = std::io::stdout();
             stdout.write(data).unwrap();
             stdout.flush().unwrap();
-            Reply::Unknown
+            Reply::Unknown(header.clone(), data.to_vec())
         }
     })
 }
 
+#[derive(Clone, Debug)]
 struct Header {
     port: u8,
     pid: u8,
@@ -234,10 +282,7 @@ fn main() -> Result<()> {
         let mut payload = vec![0; header.data_len as usize];
         stream.read_exact(&mut payload)?;
         match parse_reply(&header, &payload) {
-            Ok(Reply::Version((maj, min))) => eprintln!("Version: {}.{}", maj, min),
-            Ok(Reply::PortInfo(s)) => eprintln!("Port info: {}", s),
-            Ok(Reply::PortCaps(s)) => eprintln!("Port caps: {}", s),
-            Ok(Reply::Unknown) => eprintln!("Unknown reply"),
+            Ok(reply) => eprintln!("Reply: {}", reply.description()),
             Err(e) => eprintln!("Error parsing reply: {:?}", e),
         }
     }
