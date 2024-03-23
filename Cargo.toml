@@ -2,8 +2,12 @@
 name = "agw"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+authors = ["Thomas Habets <thomas@habets.se>"]
+# readme = "README.md"
+repository = "https://github.com/ThomasHabets/rustradio"
+description = "AGW protocol implementation"
+keywords = ["radio"]
 
 [dependencies]
 anyhow = "1.0.81"
