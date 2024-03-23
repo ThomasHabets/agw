@@ -12,3 +12,4 @@ keywords = ["radio"]
 [dependencies]
 anyhow = "1.0.81"
 clap = { version = "4.5.3", features = ["derive"] }
+log = "0.4.21"

@@ -1,5 +1,6 @@
 use anyhow::{Error, Result};
 use clap::Parser;
+use log::warn;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -32,7 +33,29 @@ fn connect(port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Vec<u8>> {
     Header::new(port, b'C', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()
 }
 
-fn unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec<u8>> {
+fn connect_via(port: u8, pid: u8, src: &Call, dst: &Call, via: &[Call]) -> Result<Vec<u8>> {
+    let h = Header::new(port, b'v', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()?;
+    const MAX_HOPS: usize = 7;
+    if via.len() > MAX_HOPS {
+        return Err(Error::msg(format!(
+            "tried to connect through too many hops: {} > {MAX_HOPS}",
+            via.len()
+        )));
+    }
+
+    let mut hops = Vec::new();
+    hops.push(via.len() as u8);
+    for call in via {
+        hops.extend_from_slice(&call.bytes);
+    }
+    Ok([h, hops.to_vec()].concat())
+}
+
+fn disconnect(port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Vec<u8>> {
+    Header::new(port, b'd', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()
+}
+
+fn make_unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec<u8>> {
     let h = Header::new(
         port,
         b'M',
@@ -85,7 +108,7 @@ impl Call {
 enum Reply {
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
-    Version((u16, u16)),              // R.
+    Version(u16, u16),                // R.
     CallsignRegistration(bool),       // X.
     PortInfo(String),                 // G. TODO: parse
     PortCaps(String),                 // g. TODO: parse
@@ -111,7 +134,7 @@ impl Reply {
             Reply::PortInfo(s) => format!("Port info: {}", s),
             Reply::PortCaps(s) => format!("Port caps: {}", s),
             Reply::Connected(s) => format!("Connected: {}", s),
-            Reply::Version((maj, min)) => format!("Version: {maj}.{min}"),
+            Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::Raw(_data) => "Raw".to_string(),
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
             Reply::FramesOutstandingPort(n) => format!("Frames outstanding port: {n}"),
@@ -138,7 +161,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                     .try_into()
                     .expect("can't happen: two bytes can't be made into u16?"),
             );
-            Reply::Version((major, minor))
+            Reply::Version(major, minor)
         }
         b'X' => Reply::CallsignRegistration(data[0] == 1),
         b'C' => Reply::Connected(std::str::from_utf8(data)?.to_string()),
@@ -179,6 +202,26 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'K' => Reply::Raw(data.to_vec()),
         k => Reply::Unknown(header.clone(), data.to_vec()),
     })
+}
+
+struct Connection {
+    src: Call,
+    dst: Call,
+}
+
+impl Connection {
+    fn new(src: Call, dst: Call) -> Connection {
+        Connection { src, dst }
+    }
+    fn disconnect(&mut self) {
+        // TODO
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.disconnect();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -242,45 +285,148 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Header {
     }
 }
 
+struct Stream {
+    stream: TcpStream,
+}
+
+impl Stream {
+    fn new(addr: &str) -> Result<Self> {
+        Ok(Self {
+            stream: TcpStream::connect(addr)?,
+        })
+    }
+}
+
+use std::collections::LinkedList;
+use std::sync::mpsc;
+
+struct AGW {
+    rx: mpsc::Receiver<(Header, Reply)>,
+    rxqueue: LinkedList<(Header, Reply)>,
+    stream: TcpStream,
+}
+
+impl AGW {
+    fn new(addr: &str) -> Result<AGW> {
+        let (tx, rx) = mpsc::channel();
+        let mut stream = TcpStream::connect(addr)?;
+        let mut agw = AGW {
+            rx,
+            stream: stream.try_clone()?,
+            rxqueue: LinkedList::new(),
+        };
+        std::thread::spawn(|| {
+            Self::reader(stream, tx);
+        });
+        Ok(agw)
+    }
+
+    fn send(&mut self, msg: &[u8]) -> Result<()> {
+        self.stream.write(&msg)?;
+        Ok(())
+    }
+
+    fn reader(mut stream: TcpStream, tx: mpsc::Sender<(Header, Reply)>) -> Result<()> {
+        loop {
+            let mut header = [0 as u8; HEADER_LEN];
+            stream.read_exact(&mut header)?;
+            let header = parse_header(&header);
+            let payload = if header.data_len > 0 {
+                let mut payload = vec![0; header.data_len as usize];
+                stream.read_exact(&mut payload)?;
+                payload
+            } else {
+                Vec::new()
+            };
+            let reply = parse_reply(&header, &payload)?;
+            tx.send((header, reply))?;
+        }
+    }
+
+    fn rx_enqueue(&mut self, h: Header, r: Reply) {
+        self.rxqueue.push_back((h, r));
+        const WARN_LIMIT: usize = 10;
+        let l = self.rxqueue.len();
+        if l > WARN_LIMIT {
+            warn!("AGW maxqueue length {l} > {WARN_LIMIT}");
+        }
+    }
+
+    fn version(&mut self) -> Result<(u16, u16)> {
+        self.send(&version_info())?;
+        loop {
+            let (h, r) = self.rx.recv()?;
+            match r {
+                Reply::Version(maj, min) => return Ok((maj, min)),
+                other => self.rx_enqueue(h, other),
+            }
+        }
+    }
+    fn port_info(&mut self) -> Result<String> {
+        self.send(&port_info())?;
+        loop {
+            let (h, r) = self.rx.recv()?;
+            match r {
+                Reply::PortInfo(i) => return Ok(i),
+                other => self.rx_enqueue(h, other),
+            }
+        }
+    }
+    fn port_cap(&mut self, port: u8) -> Result<String> {
+        self.send(&port_cap(port))?;
+        loop {
+            let (h, r) = self.rx.recv()?;
+            match r {
+                Reply::PortCaps(i) => return Ok(i),
+                other => self.rx_enqueue(h, other),
+            }
+        }
+    }
+
+    fn unproto(&mut self, port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<()> {
+        self.send(&make_unproto(port, pid, src, dst, data)?)?;
+        Ok(())
+    }
+
+    fn connect(&mut self, port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Connection> {
+        self.send(&connect(port, pid, src, dst)?)?;
+        self.send(&disconnect(port, pid, src, dst)?)?;
+        /*loop {
+            let (h, r) = self.rx.recv()?;
+            match r {
+                Reply::Connected(i) => return Ok(i),
+                other => self.rx_enqueue(h, other),
+            }
+        }*/
+        Ok(Connection::new(src.clone(), dst.clone()))
+    }
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    let mut stream = TcpStream::connect("127.0.0.1:8010")?;
+    let mut agw = AGW::new("127.0.0.1:8010")?;
 
-    let msg = match args.command.as_str() {
-        "version" => version_info(),
-        "port_info" => port_info(),
-        "port_cap" => port_cap(0),
-        "unproto" => unproto(
+    match args.command.as_str() {
+        "version" => eprintln!("Version: {:?}", agw.version()?),
+        "port_info" => eprintln!("{}", agw.port_info()?),
+        "port_cap" => eprintln!("{}", agw.port_cap(0)?),
+        "unproto" => agw.unproto(
             0,
             0xF0,
             &Call::from_str("M0THC-1")?,
             &Call::from_str("APZ001")?,
             b"hello world",
         )?,
-        "connect" => connect(
-            0,
-            0,
-            &Call::from_str("M0THC-1")?,
-            &Call::from_str("M0THC-2")?,
-        )?,
+        "connect" => {
+            let con = agw.connect(
+                0,
+                0,
+                &Call::from_str("M0THC-1")?,
+                &Call::from_str("M0THC-2")?,
+            )?;
+        }
         _ => panic!("unknown command"),
     };
-
-    stream.write(&msg)?;
-
-    // Read reply
-    let mut header = [0 as u8; HEADER_LEN];
-    stream.read_exact(&mut header)?;
-    let header = parse_header(&header);
-    if header.data_len > 0 {
-        let mut payload = vec![0; header.data_len as usize];
-        stream.read_exact(&mut payload)?;
-        match parse_reply(&header, &payload) {
-            Ok(reply) => eprintln!("Reply: {}", reply.description()),
-            Err(e) => eprintln!("Error parsing reply: {:?}", e),
-        }
-    }
-
     Ok(())
 }
