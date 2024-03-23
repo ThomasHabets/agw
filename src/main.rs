@@ -112,7 +112,7 @@ impl Reply {
             Reply::PortCaps(s) => format!("Port caps: {}", s),
             Reply::Connected(s) => format!("Connected: {}", s),
             Reply::Version((maj, min)) => format!("Version: {maj}.{min}"),
-            Reply::Raw(data) => "Raw".to_string(),
+            Reply::Raw(_data) => "Raw".to_string(),
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
             Reply::FramesOutstandingPort(n) => format!("Frames outstanding port: {n}"),
             Reply::FramesOutstandingConnection(n) => format!("Frames outstanding connection: {n}"),
@@ -176,13 +176,8 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'H' => Reply::HeardStations(std::str::from_utf8(data)?.to_string()),
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
-        k => {
-            eprintln!("Unknown kind {}", k);
-            let mut stdout = std::io::stdout();
-            stdout.write(data).unwrap();
-            stdout.flush().unwrap();
-            Reply::Unknown(header.clone(), data.to_vec())
-        }
+        b'K' => Reply::Raw(data.to_vec()),
+        k => Reply::Unknown(header.clone(), data.to_vec()),
     })
 }
 
