@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 authors = ["Thomas Habets <thomas@habets.se>"]
 readme = "README.md"
-repository = "https://github.com/ThomasHabets/rustradio"
+repository = "https://github.com/ThomasHabets/agw"
 description = "AGW protocol implementation"
 keywords = ["radio"]
 
