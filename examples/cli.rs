@@ -1,51 +1,71 @@
 use agw::Call;
 use anyhow::Result;
 use clap::Parser;
+use clap::Subcommand;
 
-#[derive(Parser)]
+#[derive(Subcommand, Debug)]
+enum Command {
+    Connect {
+        src: String,
+        dst: String,
+    },
+    Version {},
+    PortInfo {
+        port: u8,
+    },
+    PortCap {
+        port: u8,
+    },
+    Unproto {
+        src: String,
+        dst: String,
+        msg: String,
+    },
+}
+
+#[derive(Parser, Debug)]
 struct Cli {
-    /// Subcommand
-    command: String,
+    #[command(subcommand)]
+    command: Command,
 
     #[clap(short)]
     verbose: Option<usize>,
+
+    #[clap(short = 'c', default_value = "127.0.0.1:8010")]
+    agw_addr: String,
 }
 
 fn main() -> Result<()> {
-    let args = Cli::parse();
+    let opt = Cli::parse();
     stderrlog::new()
         .module(module_path!())
         .module("agw")
         .quiet(false)
-        .verbosity(args.verbose.unwrap_or(0))
+        .verbosity(opt.verbose.unwrap_or(0))
         .timestamp(stderrlog::Timestamp::Second)
         .init()
         .unwrap();
 
-    let mut agw = agw::AGW::new("127.0.0.1:8010")?;
+    let mut agw = agw::AGW::new(&opt.agw_addr)?;
 
-    match args.command.as_str() {
-        "version" => eprintln!("Version: {:?}", agw.version()?),
-        "port_info" => eprintln!("{}", agw.port_info()?),
-        "port_cap" => eprintln!("{}", agw.port_cap(0)?),
-        "unproto" => agw.unproto(
+    match opt.command {
+        Command::Version {} => {
+            let (a, b) = agw.version()?;
+            eprintln!("AGW server version: {a}.{b}");
+        }
+        Command::PortInfo { port } => eprintln!("{}", agw.port_info(port)?),
+        Command::PortCap { port } => eprintln!("{}", agw.port_cap(port)?),
+        Command::Unproto { src, dst, msg } => agw.unproto(
             0,
             0xF0,
-            &Call::from_str("M0THC-1")?,
-            &Call::from_str("APZ001")?,
-            b"hello world",
+            &Call::from_str(&src)?,
+            &Call::from_str(&dst)?,
+            &msg.into_bytes(),
         )?,
-        "connect" => {
-            let mut con = agw.connect(
-                0,
-                0,
-                &Call::from_str("M0THC-1")?,
-                &Call::from_str("M0THC-2")?,
-                &[],
-            )?;
+        Command::Connect { src, dst } => {
+            let mut con = agw.connect(0, 0, &Call::from_str(&src)?, &Call::from_str(&dst)?, &[])?;
             con.disconnect()?;
         }
-        _ => panic!("unknown command"),
     };
     Ok(())
 }

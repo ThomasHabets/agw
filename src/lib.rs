@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 
-fn port_info() -> Vec<u8> {
-    Header::new(0, b'G', 0, None, None, 0)
+fn port_info(port: u8) -> Vec<u8> {
+    Header::new(port, b'G', 0, None, None, 0)
         .serialize()
         .expect("can't happen: port_info serialization failed")
 }
@@ -364,8 +364,8 @@ impl AGW {
             }
         }
     }
-    pub fn port_info(&mut self) -> Result<String> {
-        self.send(&port_info())?;
+    pub fn port_info(&mut self, port: u8) -> Result<String> {
+        self.send(&port_info(port))?;
         loop {
             let (h, r) = self.rx.recv()?;
             match r {
