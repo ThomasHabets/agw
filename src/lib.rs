@@ -62,7 +62,7 @@ fn make_unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Resul
     Ok([h, data.to_vec()].concat())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     bytes: [u8; 10],
 }
@@ -96,6 +96,19 @@ impl Call {
             }
         }
         true
+    }
+}
+
+impl std::fmt::Display for Call {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (n, ch) in self.bytes.iter().enumerate() {
+            if *ch == 0 {
+                let s = String::from_utf8(self.bytes[..n].to_vec()).unwrap();
+                return write!(f, "{s}");
+            }
+        }
+        let s = String::from_utf8(self.bytes.to_vec()).unwrap();
+        write!(f, "{s}")
     }
 }
 
@@ -218,9 +231,11 @@ impl<'a> Connection<'a> {
             disconnected: false,
         }
     }
+    pub fn read(&mut self) -> Result<Vec<u8>> {
+        self.agw.read_connected(&self.src, &self.dst)
+    }
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
-            eprintln!("disc");
             debug!("disconnecting");
             self.agw
                 .send(&disconnect(self.port, self.pid, &self.src, &self.dst)?)?;
@@ -301,6 +316,10 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Header {
 
 pub struct AGW {
     rx: mpsc::Receiver<(Header, Reply)>,
+
+    // TODO: LinkedList is not awesome, because it's O(n) to remove an
+    // element in the middle.
+    // Maybe once Rust RFC2570 gets solved, it'll all be fine.
     rxqueue: LinkedList<(Header, Reply)>,
     stream: TcpStream,
 }
@@ -411,13 +430,49 @@ impl AGW {
             self.send(&connect_via(port, pid, src, dst, via)?)?;
             todo!();
         }
-        /*loop {
+        loop {
+            let (head, r) = self.rx.recv()?;
+            if head.src.as_ref().map_or(true, |x| x != dst)
+                || head.dst.as_ref().map_or(true, |x| x != src)
+            {
+                continue;
+            }
+            match r {
+                Reply::Connected(i) => {
+                    eprintln!("Connected from {src} to {dst} with connect string {i}");
+                    break;
+                }
+                other => self.rx_enqueue(head, other),
+            }
+        }
+        Ok(Connection::new(self, port, pid, src.clone(), dst.clone()))
+    }
+
+    fn read_connected(&mut self, me: &Call, remote: &Call) -> Result<Vec<u8>> {
+        // First check the existing queue.
+        for frame in self.rxqueue.iter().enumerate() {
+            let (n, (head, payload)) = &frame;
+            if head.src.as_ref().map_or(true, |x| x != remote)
+                || head.dst.as_ref().map_or(true, |x| x != me)
+            {
+                continue;
+            }
+            if let Reply::ConnectedData(data) = payload {
+                let ret = data.to_vec();
+                let mut tail = self.rxqueue.split_off(*n);
+                tail.pop_front();
+                self.rxqueue.append(&mut tail);
+                return Ok(ret);
+            }
+        }
+
+        // Next packet not in the queue. Wait.
+        loop {
             let (h, r) = self.rx.recv()?;
             match r {
-                Reply::Connected(i) => return Ok(i),
+                Reply::ConnectedData(i) => return Ok(i),
                 other => self.rx_enqueue(h, other),
             }
-        }*/
-        Ok(Connection::new(self, port, pid, src.clone(), dst.clone()))
+        }
     }
 }

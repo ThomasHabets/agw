@@ -64,6 +64,7 @@ fn main() -> Result<()> {
         )?,
         Command::Connect { src, dst } => {
             let mut con = agw.connect(0, 0, &Call::from_str(&src)?, &Call::from_str(&dst)?, &[])?;
+            eprintln!("Read: {:?}", con.read()?);
             con.disconnect()?;
         }
     };
