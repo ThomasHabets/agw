@@ -1,15 +1,9 @@
 use anyhow::{Error, Result};
-use clap::Parser;
-use log::warn;
+use log::{debug, warn};
+use std::collections::LinkedList;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-
-// Search for a pattern in a file and display the lines that contain it.
-#[derive(Parser)]
-struct Cli {
-    /// Subcommand
-    command: String,
-}
+use std::sync::mpsc;
 
 fn port_info() -> Vec<u8> {
     Header::new(0, b'G', 0, None, None, 0)
@@ -69,7 +63,7 @@ fn make_unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Resul
 }
 
 #[derive(Clone, Debug)]
-struct Call {
+pub struct Call {
     bytes: [u8; 10],
 }
 
@@ -81,7 +75,7 @@ impl Call {
         }
         Call { bytes: arr }
     }
-    fn from_str(s: &str) -> Result<Call> {
+    pub fn from_str(s: &str) -> Result<Call> {
         if s.len() > 10 {
             return Err(Error::msg(format!(
                 "callsign '{}' is longer than 10 characters",
@@ -95,7 +89,7 @@ impl Call {
         Ok(Call { bytes: arr })
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         for b in self.bytes {
             if b != 0 {
                 return false;
@@ -200,27 +194,47 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
         b'K' => Reply::Raw(data.to_vec()),
-        k => Reply::Unknown(header.clone(), data.to_vec()),
+        _ => Reply::Unknown(header.clone(), data.to_vec()),
     })
 }
 
-struct Connection {
+pub struct Connection<'a> {
+    port: u8,
+    pid: u8,
     src: Call,
     dst: Call,
+    agw: &'a mut AGW,
+    disconnected: bool,
 }
 
-impl Connection {
-    fn new(src: Call, dst: Call) -> Connection {
-        Connection { src, dst }
+impl<'a> Connection<'a> {
+    fn new(agw: &'a mut AGW, port: u8, pid: u8, src: Call, dst: Call) -> Connection {
+        Connection {
+            port,
+            pid,
+            src,
+            dst,
+            agw,
+            disconnected: false,
+        }
     }
-    fn disconnect(&mut self) {
-        // TODO
+    pub fn disconnect(&mut self) -> Result<()> {
+        if !self.disconnected {
+            eprintln!("disc");
+            debug!("disconnecting");
+            self.agw
+                .send(&disconnect(self.port, self.pid, &self.src, &self.dst)?)?;
+            self.disconnected = true;
+        }
+        Ok(())
     }
 }
 
-impl Drop for Connection {
+impl<'a> Drop for Connection<'a> {
     fn drop(&mut self) {
-        self.disconnect();
+        if let Err(e) = self.disconnect() {
+            warn!("drop-disconnection errored with {:?}", e);
+        }
     }
 }
 
@@ -285,38 +299,25 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Header {
     }
 }
 
-struct Stream {
-    stream: TcpStream,
-}
-
-impl Stream {
-    fn new(addr: &str) -> Result<Self> {
-        Ok(Self {
-            stream: TcpStream::connect(addr)?,
-        })
-    }
-}
-
-use std::collections::LinkedList;
-use std::sync::mpsc;
-
-struct AGW {
+pub struct AGW {
     rx: mpsc::Receiver<(Header, Reply)>,
     rxqueue: LinkedList<(Header, Reply)>,
     stream: TcpStream,
 }
 
 impl AGW {
-    fn new(addr: &str) -> Result<AGW> {
+    pub fn new(addr: &str) -> Result<AGW> {
         let (tx, rx) = mpsc::channel();
-        let mut stream = TcpStream::connect(addr)?;
-        let mut agw = AGW {
+        let stream = TcpStream::connect(addr)?;
+        let agw = AGW {
             rx,
             stream: stream.try_clone()?,
             rxqueue: LinkedList::new(),
         };
         std::thread::spawn(|| {
-            Self::reader(stream, tx);
+            if let Err(e) = Self::reader(stream, tx) {
+                warn!("TCP socket reader connected to AGWPE ended: {:?}", e);
+            }
         });
         Ok(agw)
     }
@@ -339,6 +340,7 @@ impl AGW {
                 Vec::new()
             };
             let reply = parse_reply(&header, &payload)?;
+            debug!("Got reply: {}", reply.description());
             tx.send((header, reply))?;
         }
     }
@@ -352,7 +354,7 @@ impl AGW {
         }
     }
 
-    fn version(&mut self) -> Result<(u16, u16)> {
+    pub fn version(&mut self) -> Result<(u16, u16)> {
         self.send(&version_info())?;
         loop {
             let (h, r) = self.rx.recv()?;
@@ -362,7 +364,7 @@ impl AGW {
             }
         }
     }
-    fn port_info(&mut self) -> Result<String> {
+    pub fn port_info(&mut self) -> Result<String> {
         self.send(&port_info())?;
         loop {
             let (h, r) = self.rx.recv()?;
@@ -372,7 +374,7 @@ impl AGW {
             }
         }
     }
-    fn port_cap(&mut self, port: u8) -> Result<String> {
+    pub fn port_cap(&mut self, port: u8) -> Result<String> {
         self.send(&port_cap(port))?;
         loop {
             let (h, r) = self.rx.recv()?;
@@ -383,14 +385,32 @@ impl AGW {
         }
     }
 
-    fn unproto(&mut self, port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<()> {
+    pub fn unproto(
+        &mut self,
+        port: u8,
+        pid: u8,
+        src: &Call,
+        dst: &Call,
+        data: &[u8],
+    ) -> Result<()> {
         self.send(&make_unproto(port, pid, src, dst, data)?)?;
         Ok(())
     }
 
-    fn connect(&mut self, port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Connection> {
-        self.send(&connect(port, pid, src, dst)?)?;
-        self.send(&disconnect(port, pid, src, dst)?)?;
+    pub fn connect<'a>(
+        &'a mut self,
+        port: u8,
+        pid: u8,
+        src: &Call,
+        dst: &Call,
+        via: &[Call],
+    ) -> Result<Connection<'a>> {
+        if via.len() == 0 {
+            self.send(&connect(port, pid, src, dst)?)?;
+        } else {
+            self.send(&connect_via(port, pid, src, dst, via)?)?;
+            todo!();
+        }
         /*loop {
             let (h, r) = self.rx.recv()?;
             match r {
@@ -398,35 +418,6 @@ impl AGW {
                 other => self.rx_enqueue(h, other),
             }
         }*/
-        Ok(Connection::new(src.clone(), dst.clone()))
+        Ok(Connection::new(self, port, pid, src.clone(), dst.clone()))
     }
-}
-
-fn main() -> Result<()> {
-    let args = Cli::parse();
-
-    let mut agw = AGW::new("127.0.0.1:8010")?;
-
-    match args.command.as_str() {
-        "version" => eprintln!("Version: {:?}", agw.version()?),
-        "port_info" => eprintln!("{}", agw.port_info()?),
-        "port_cap" => eprintln!("{}", agw.port_cap(0)?),
-        "unproto" => agw.unproto(
-            0,
-            0xF0,
-            &Call::from_str("M0THC-1")?,
-            &Call::from_str("APZ001")?,
-            b"hello world",
-        )?,
-        "connect" => {
-            let con = agw.connect(
-                0,
-                0,
-                &Call::from_str("M0THC-1")?,
-                &Call::from_str("M0THC-2")?,
-            )?;
-        }
-        _ => panic!("unknown command"),
-    };
-    Ok(())
 }
