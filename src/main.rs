@@ -1,33 +1,62 @@
+use anyhow::{Error, Result};
+use clap::Parser;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-fn port_info() -> Vec<u8> {
-    let mut v = vec![0; 36];
-    v[4] = b'G';
-    v
+// Search for a pattern in a file and display the lines that contain it.
+#[derive(Parser)]
+struct Cli {
+    /// Subcommand
+    command: String,
 }
 
-fn port_cap(n: u8) -> Vec<u8> {
-    let mut v = vec![0; 36];
-    v[0] = n;
-    v[4] = b'g';
-    v
+fn port_info() -> Vec<u8> {
+    Header::new(0, b'G', 0, None, None, 0)
+        .serialize()
+        .expect("can't happen: port_info serialization failed")
+}
+
+fn port_cap(port: u8) -> Vec<u8> {
+    Header::new(port, b'g', 0, None, None, 0)
+        .serialize()
+        .expect("can't happen: port_cap serialization failed")
 }
 
 fn version_info() -> Vec<u8> {
-    let mut v = vec![0; 36];
-    v[4] = b'R';
-    v
+    Header::new(0, b'R', 0, None, None, 0)
+        .serialize()
+        .expect("can't happen: version_info serialization failed")
 }
 
+fn connect(port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Vec<u8>> {
+    Header::new(port, b'C', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()
+}
+
+fn unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec<u8>> {
+    let h = Header::new(
+        port,
+        b'M',
+        pid,
+        Some(src.clone()),
+        Some(dst.clone()),
+        data.len() as u32,
+    )
+    .serialize()?;
+    Ok([h, data.to_vec()].concat())
+}
+
+#[derive(Clone)]
 struct Call {
     bytes: [u8; 10],
 }
 
-fn make_call(s: &str) -> Result<Call, &'static str> {
+fn parse_call(s: &str) -> Result<Call> {
     let bytes = s.as_bytes();
     if bytes.len() > 10 {
-        return Err("callsign '{}' is longer than 10 characters");
+        return Err(Error::msg(format!(
+            "callsign '{}' is longer than 10 characters",
+            s
+        )));
     }
 
     let mut arr = [0; 10];
@@ -36,24 +65,6 @@ fn make_call(s: &str) -> Result<Call, &'static str> {
     }
 
     Ok(Call { bytes: arr })
-}
-
-fn unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Vec<u8> {
-    let mut v = vec![0; data.len() + 36];
-    v[0] = port;
-    v[4] = b'M';
-    v[6] = pid;
-
-    v.splice(8..18, src.bytes.iter().cloned());
-    v.splice(18..28, dst.bytes.iter().cloned());
-    v.splice(28..32, u32::to_le_bytes(data.len() as u32));
-    v.splice(36.., data.iter().cloned());
-
-    let mut stdout = std::io::stdout();
-    stdout.write(&v);
-    stdout.flush().unwrap();
-    eprintln!("Packet len: {}", v.len());
-    v
 }
 
 fn parse_reply(header: &Header, data: &[u8]) {
@@ -100,27 +111,74 @@ fn parse_reply(header: &Header, data: &[u8]) {
 
 struct Header {
     port: u8,
+    pid: u8,
     data_kind: u8,
     data_len: u32,
+    src: Option<Call>,
+    dst: Option<Call>,
+}
+const HEADER_LEN: usize = 36;
+impl Header {
+    fn new(
+        port: u8,
+        data_kind: u8,
+        pid: u8,
+        src: Option<Call>,
+        dst: Option<Call>,
+        data_len: u32,
+    ) -> Header {
+        Header {
+            port,
+            data_kind,
+            pid,
+            data_len,
+            src,
+            dst,
+        }
+    }
+    fn serialize(&self) -> Result<Vec<u8>> {
+        let mut v = vec![0; HEADER_LEN];
+        v[0] = self.port;
+        v[4] = self.data_kind;
+        v[6] = self.pid;
+
+        if let Some(src) = &self.src {
+            v.splice(8..18, src.bytes.iter().cloned());
+        }
+        if let Some(dst) = &self.dst {
+            v.splice(18..28, dst.bytes.iter().cloned());
+        }
+        v.splice(28..32, u32::to_le_bytes(self.data_len));
+        Ok(v)
+    }
 }
 
 fn parse_header(header: &[u8]) -> Header {
-    if header.len() != 36 {
+    if header.len() != HEADER_LEN {
         panic!();
     }
     Header {
         port: header[0],
         data_kind: header[4],
         data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
+        src: None, // TODO
+        dst: None, // TODO
+        pid: 0,    // TODO
     }
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<()> {
+    let args = Cli::parse();
+
     let mut stream = TcpStream::connect("127.0.0.1:8010")?;
 
-    //let msg = version_info();
-    //let msg = port_info();
-    let msg = port_cap(0);
+    let msg = match args.command.as_str() {
+        "version" => version_info(),
+        "port_info" => port_info(),
+        "port_cap" => port_cap(0),
+        "connect" => connect(0, 0, &parse_call("M0THC-1")?, &parse_call("M0THC-2")?)?,
+        _ => panic!("unknown command"),
+    };
 
     /*
     let src = make_call("M0THC-1").unwrap();
@@ -130,7 +188,7 @@ fn main() -> std::io::Result<()> {
     stream.write(&msg).unwrap();
     //eprintln!("Sent command!, awaiting reply...");
 
-    let mut header = [0 as u8; 36];
+    let mut header = [0 as u8; HEADER_LEN];
     stream.read_exact(&mut header)?;
     let header = parse_header(&header);
 
