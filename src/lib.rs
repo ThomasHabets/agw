@@ -81,12 +81,16 @@ pub struct Call {
 }
 
 impl Call {
-    fn parse(bytes: &[u8]) -> Call {
+    fn parse(bytes: &[u8]) -> Result<Call> {
         let mut arr = [0; 10];
         for (i, &item) in bytes.iter().enumerate() {
+            // TODO: is slash valid?
+            if !item.is_ascii_alphanumeric() && item != b'-' {
+                return Err(Error::msg("callsign includes invalid characters"));
+            }
             arr[i] = item;
         }
-        Call { bytes: arr }
+        Ok(Call { bytes: arr })
     }
     pub fn from_str(s: &str) -> Result<Call> {
         if s.len() > 10 {
@@ -316,19 +320,19 @@ impl Header {
     }
 }
 
-fn parse_header(header: &[u8; HEADER_LEN]) -> Header {
-    let src = Call::parse(&header[8..18]);
+fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
+    let src = Call::parse(&header[8..18])?;
     let src = if src.is_empty() { None } else { Some(src) };
-    let dst = Call::parse(&header[18..28]);
+    let dst = Call::parse(&header[18..28])?;
     let dst = if dst.is_empty() { None } else { Some(dst) };
-    Header {
+    Ok(Header {
         port: header[0],
         data_kind: header[4],
         pid: header[6],
         src: src,
         dst: dst,
         data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
-    }
+    })
 }
 
 pub struct AGW {
@@ -367,7 +371,7 @@ impl AGW {
         loop {
             let mut header = [0 as u8; HEADER_LEN];
             stream.read_exact(&mut header)?;
-            let header = parse_header(&header);
+            let header = parse_header(&header)?;
             let payload = if header.data_len > 0 {
                 let mut payload = vec![0; header.data_len as usize];
                 stream.read_exact(&mut payload)?;
