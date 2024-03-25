@@ -21,3 +21,6 @@ clap = { version = "4.5.3", features = ["derive"] }
 [lib]
 name = "agw"
 path = "src/lib.rs"
+
+[profile.release]
+overflow-checks = true
