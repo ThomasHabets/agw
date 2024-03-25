@@ -27,6 +27,19 @@ fn connect(port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Vec<u8>> {
     Header::new(port, b'C', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()
 }
 
+fn write_connected(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec<u8>> {
+    let h = Header::new(
+        port,
+        b'D',
+        pid,
+        Some(src.clone()),
+        Some(dst.clone()),
+        data.len() as u32,
+    )
+    .serialize()?;
+    Ok([h, data.to_vec()].concat())
+}
+
 fn connect_via(port: u8, pid: u8, src: &Call, dst: &Call, via: &[Call]) -> Result<Vec<u8>> {
     let h = Header::new(port, b'v', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()?;
     const MAX_HOPS: usize = 7;
@@ -233,6 +246,10 @@ impl<'a> Connection<'a> {
     }
     pub fn read(&mut self) -> Result<Vec<u8>> {
         self.agw.read_connected(&self.src, &self.dst)
+    }
+    pub fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.agw
+            .write_connected(self.port, self.pid, &self.src, &self.dst, data)
     }
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
@@ -446,6 +463,22 @@ impl AGW {
             }
         }
         Ok(Connection::new(self, port, pid, src.clone(), dst.clone()))
+    }
+
+    fn write_connected(
+        &mut self,
+        port: u8,
+        pid: u8,
+        src: &Call,
+        dst: &Call,
+        data: &[u8],
+    ) -> Result<usize> {
+        // TODO: enforce max size?
+        let len = data.len();
+        if len > 0 {
+            self.send(&write_connected(port, pid, src, dst, data)?)?;
+        }
+        Ok(data.len())
     }
 
     fn read_connected(&mut self, me: &Call, remote: &Call) -> Result<Vec<u8>> {

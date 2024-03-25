@@ -52,9 +52,9 @@ fn main() {
                 Dialog::around(
                     EditView::new()
                         .on_submit(move |s, text| {
-			    // TODO: if adding new stuff, and not at bottom,
-			    // create a notification that gets dismissed when
-			    // at bottom.
+                            // TODO: if adding new stuff, and not at bottom,
+                            // create a notification that gets dismissed when
+                            // at bottom.
                             for _ in 0..30 {
                                 content.append(text.to_owned() + "\n");
                             }
