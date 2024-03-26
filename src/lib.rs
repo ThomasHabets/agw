@@ -472,12 +472,12 @@ impl AGW {
             if head.src.as_ref().map_or(true, |x| x != dst)
                 || head.dst.as_ref().map_or(true, |x| x != src)
             {
-                eprintln!("Got packet not for us");
+                //eprintln!("Got packet not for us");
                 continue;
             }
             match r {
                 Reply::Connected(i) => {
-                    eprintln!("Connected from {src} to {dst} with connect string {i}");
+                    debug!("Connected from {src} to {dst} with connect string {i}");
                     break;
                 }
                 other => self.rx_enqueue(head, other),
