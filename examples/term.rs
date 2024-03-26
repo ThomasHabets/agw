@@ -1,11 +1,12 @@
+use agw::Call;
+use anyhow::Result;
+use clap::Parser;
 use cursive::align::Align;
 use cursive::theme::{Color, ColorStyle, ColorType};
 use cursive::view::{Nameable, Resizable, ScrollStrategy};
 use cursive::views::{Dialog, EditView, LinearLayout, ScrollView, TextContent, TextView};
+use log::debug;
 use std::sync::mpsc;
-use clap::Parser;
-use agw::Call;
-use anyhow::Result;
 
 fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
     let mut siv = cursive::default();
@@ -16,9 +17,9 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
     let content2 = content.clone();
     let initial_content = content.clone();
     std::thread::spawn(move || {
-	for c in down_rx {
-	    content2.append(c);
-	}
+        for c in down_rx {
+            content2.append(c);
+        }
     });
     siv.set_window_title("AGW Terminal");
     siv.with_theme(|t| {
@@ -65,10 +66,12 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
                             // TODO: if adding new stuff, and not at bottom,
                             // create a notification that gets dismissed when
                             // at bottom.
-                            for _ in 0..1 {
-                                content.append(text.to_owned() + "\n");
+                            if false {
+                                for _ in 0..1 {
+                                    content.append(text.to_owned() + "\n");
+                                }
                             }
-			    up_tx.send(text.to_owned()).unwrap();
+                            up_tx.send(text.to_owned() + "\r").unwrap();
                             s.call_on_name("edit", |e: &mut EditView| {
                                 e.set_content("");
                             })
@@ -102,14 +105,12 @@ struct Cli {
     dst: String,
 }
 
-fn main() -> Result<()>{
+fn main() -> Result<()> {
     let opt = Cli::parse();
-    
+
     let (up_tx, up_rx) = mpsc::channel();
     let (down_tx, down_rx) = mpsc::channel();
-    let ui_thread = std::thread::spawn(move || {
-	run_ui(up_tx, down_rx)
-    });
+    let ui_thread = std::thread::spawn(move || run_ui(up_tx, down_rx));
 
     let mut agw = agw::AGW::new(&opt.agw_addr)?;
     let src = &Call::from_str(&opt.src)?;
@@ -117,28 +118,29 @@ fn main() -> Result<()>{
     agw.register_callsign(0, 0xF0, src)?;
     let mut con = agw.connect(0, 0xF0, src, dst, &[])?;
 
-    // down
-
-    let down_thread = std::thread::spawn(move || {
-	loop {
-	    let read = con.read().expect("connection read");
-	    if let Err(_) = down_tx.send(ascii7_to_str(read)) {
-		break;
-	    }
-	}
-    });
+    let sender = con.sender();
     // up
+    let make_writer = con.make_writer();
+    let up_thread = std::thread::spawn(move || loop {
+        let data = up_rx.recv().unwrap();
+        let data = data.as_bytes();
+        let data = make_writer.make(data);
+        sender.send(data).unwrap();
+    });
+    // down
     loop {
-	let msg = up_rx.recv().unwrap();
-	con.write(msg.as_bytes())?;
+        let read = con.read().expect("connection read");
+        if let Err(e) = down_tx.send(ascii7_to_str(read)) {
+            debug!("down_tx failed: {}", e);
+            break;
+        }
     }
-    down_thread.join().expect("down_thread join failed");
-    
-    panic!();
+    up_thread.join().expect("down_thread join failed");
     ui_thread.join().expect("thread not to crash");
     Ok(())
 }
 
+// TODO: smarter
 fn ascii7_to_str(bytes: Vec<u8>) -> String {
     let mut s = String::new();
     for b in bytes.iter() {

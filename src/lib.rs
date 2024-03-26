@@ -247,6 +247,18 @@ pub struct Connection<'a> {
     disconnected: bool,
 }
 
+pub struct MakeWriter {
+    port: u8,
+    pid: u8,
+    src: Call,
+    dst: Call,
+}
+impl MakeWriter {
+    pub fn make(&self, data: &[u8]) -> Vec<u8> {
+        write_connected(self.port, self.pid, &self.src, &self.dst, data).unwrap()
+    }
+}
+
 impl<'a> Connection<'a> {
     fn new(agw: &'a mut AGW, port: u8, pid: u8, src: Call, dst: Call) -> Connection {
         Connection {
@@ -258,12 +270,24 @@ impl<'a> Connection<'a> {
             disconnected: false,
         }
     }
+
     pub fn read(&mut self) -> Result<Vec<u8>> {
         self.agw.read_connected(&self.src, &self.dst)
     }
     pub fn write(&mut self, data: &[u8]) -> Result<usize> {
         self.agw
             .write_connected(self.port, self.pid, &self.src, &self.dst, data)
+    }
+    pub fn make_writer(&self) -> MakeWriter {
+        MakeWriter {
+            port: self.port,
+            pid: self.pid,
+            src: self.src.clone(),
+            dst: self.dst.clone(),
+        }
+    }
+    pub fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
+        self.agw.sender()
     }
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
@@ -348,33 +372,54 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
 pub struct AGW {
     rx: mpsc::Receiver<(Header, Reply)>,
 
+    // Write entire frames.
+    tx: mpsc::Sender<Vec<u8>>,
+
     // TODO: LinkedList is not awesome, because it's O(n) to remove an
     // element in the middle.
     // Maybe once Rust RFC2570 gets solved, it'll all be fine.
     rxqueue: LinkedList<(Header, Reply)>,
-    stream: TcpStream,
 }
 
 impl AGW {
     pub fn new(addr: &str) -> Result<AGW> {
         let (tx, rx) = mpsc::channel();
-        let stream = TcpStream::connect(addr)?;
+        let (tx2, rx2) = mpsc::channel();
+        let wstream = TcpStream::connect(addr)?;
+        let rstream = wstream.try_clone()?;
         let agw = AGW {
             rx,
-            stream: stream.try_clone()?,
+            tx: tx2,
             rxqueue: LinkedList::new(),
         };
+        // Start reader.
         std::thread::spawn(|| {
-            if let Err(e) = Self::reader(stream, tx) {
+            if let Err(e) = Self::reader(rstream, tx) {
                 warn!("TCP socket reader connected to AGWPE ended: {:?}", e);
+            }
+        });
+        // Start writer.
+        std::thread::spawn(|| {
+            if let Err(e) = Self::writer(wstream, rx2) {
+                warn!("TCP socket writer connected to AGWPE ended: {:?}", e);
             }
         });
         Ok(agw)
     }
 
     fn send(&mut self, msg: &[u8]) -> Result<()> {
-        self.stream.write(&msg)?;
+        self.tx.send(msg.to_vec())?;
         Ok(())
+    }
+    pub fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
+        self.tx.clone()
+    }
+
+    fn writer(mut stream: TcpStream, rx: mpsc::Receiver<Vec<u8>>) -> Result<()> {
+        loop {
+            let buf = rx.recv()?;
+            stream.write(&buf)?;
+        }
     }
 
     fn reader(mut stream: TcpStream, tx: mpsc::Sender<(Header, Reply)>) -> Result<()> {
