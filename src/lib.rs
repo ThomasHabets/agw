@@ -81,10 +81,10 @@ pub struct Call {
 }
 
 impl Call {
-    fn parse(bytes: &[u8]) -> Result<Call> {
+    fn from_bytes(bytes: &[u8]) -> Result<Call> {
         if bytes.len() > 10 {
             return Err(Error::msg(format!(
-                "callsign '{}' is longer than 10 characters",
+                "callsign '{:?}' is longer than 10 characters",
                 bytes
             )));
         }
@@ -101,17 +101,7 @@ impl Call {
         Ok(Call { bytes: arr })
     }
     pub fn from_str(s: &str) -> Result<Call> {
-        if s.len() > 10 {
-            return Err(Error::msg(format!(
-                "callsign '{}' is longer than 10 characters",
-                s
-            )));
-        }
-        let mut arr = [0; 10];
-        for (i, &item) in s.as_bytes().iter().enumerate() {
-            arr[i] = item;
-        }
-        Ok(Call { bytes: arr })
+        Self::from_bytes(&s.as_bytes())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -329,9 +319,9 @@ impl Header {
 }
 
 fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
-    let src = Call::parse(&header[8..18])?;
+    let src = Call::from_bytes(&header[8..18])?;
     let src = if src.is_empty() { None } else { Some(src) };
-    let dst = Call::parse(&header[18..28])?;
+    let dst = Call::from_bytes(&header[18..28])?;
     let dst = if dst.is_empty() { None } else { Some(dst) };
     Ok(Header {
         port: header[0],
