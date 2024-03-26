@@ -82,6 +82,14 @@ pub struct Call {
 
 impl Call {
     fn parse(bytes: &[u8]) -> Result<Call> {
+        if bytes.len() > 10 {
+            return Err(Error::msg(format!(
+                "callsign '{}' is longer than 10 characters",
+                bytes
+            )));
+        }
+        // NOTE: Callsigns here are not just real callsigns, but also
+        // virtual ones like WIDE1-1 and APZ001.
         let mut arr = [0; 10];
         for (i, &item) in bytes.iter().enumerate() {
             // TODO: is slash valid?
