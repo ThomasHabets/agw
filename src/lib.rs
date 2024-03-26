@@ -62,6 +62,12 @@ fn disconnect(port: u8, pid: u8, src: &Call, dst: &Call) -> Result<Vec<u8>> {
     Header::new(port, b'd', pid, Some(src.clone()), Some(dst.clone()), 0).serialize()
 }
 
+fn register_callsign(port: u8, pid: u8, src: &Call) -> Result<Vec<u8>> {
+    Header::new(port, b'X', pid, Some(src.clone()), None, 0).serialize()
+}
+
+// TODO: unregister with 'x'
+
 fn make_unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Result<Vec<u8>> {
     let h = Header::new(
         port,
@@ -93,8 +99,11 @@ impl Call {
         let mut arr = [0; 10];
         for (i, &item) in bytes.iter().enumerate() {
             // TODO: is slash valid?
-            if !item.is_ascii_alphanumeric() && item != b'-' {
-                return Err(Error::msg("callsign includes invalid characters"));
+            if item != 0 && !item.is_ascii_alphanumeric() && item != b'-' {
+                return Err(Error::msg(format!(
+                    "callsign includes invalid character {:?}",
+                    item
+                )));
             }
             arr[i] = item;
         }
@@ -139,6 +148,7 @@ enum Reply {
     HeardStations(String),            // H. TODO: parse
     Connected(String),                // C.
     ConnectedData(Vec<u8>),           // D.
+    Disconnect,                       // d.
     MonitorConnected(Vec<u8>),        // I.
     MonitorSupervisory(Vec<u8>),      // S.
     Unproto(Vec<u8>),                 // U.
@@ -150,6 +160,7 @@ enum Reply {
 impl Reply {
     fn description(&self) -> String {
         match self {
+            Reply::Disconnect => format!("Disconnect"),
             Reply::ConnectedData(data) => format!("ConnectedData: {:?}", data),
             Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
             Reply::Unproto(data) => format!("Received unproto: {:?}", data),
@@ -188,6 +199,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'X' => Reply::CallsignRegistration(data[0] == 1),
         b'C' => Reply::Connected(std::str::from_utf8(data)?.to_string()),
         b'D' => Reply::ConnectedData(data.to_vec()),
+        b'd' => Reply::Disconnect,
         b'T' => Reply::ConnectedSent(data.to_vec()),
         b'U' => Reply::Unproto(data.to_vec()),
         b'G' => Reply::PortInfo(std::str::from_utf8(data)?.to_string()),
@@ -435,6 +447,12 @@ impl AGW {
         Ok(())
     }
 
+    pub fn register_callsign(&mut self, port: u8, pid: u8, src: &Call) -> Result<()> {
+        debug!("Registering callsign");
+        self.send(&register_callsign(port, pid, src)?)?;
+        Ok(())
+    }
+
     pub fn connect<'a>(
         &'a mut self,
         port: u8,
@@ -454,6 +472,7 @@ impl AGW {
             if head.src.as_ref().map_or(true, |x| x != dst)
                 || head.dst.as_ref().map_or(true, |x| x != src)
             {
+                eprintln!("Got packet not for us");
                 continue;
             }
             match r {
@@ -492,12 +511,20 @@ impl AGW {
             {
                 continue;
             }
-            if let Reply::ConnectedData(data) = payload {
-                let ret = data.to_vec();
-                let mut tail = self.rxqueue.split_off(*n);
-                tail.pop_front();
-                self.rxqueue.append(&mut tail);
-                return Ok(ret);
+            match payload {
+                Reply::ConnectedData(data) => {
+                    let ret = data.to_vec();
+                    let mut tail = self.rxqueue.split_off(*n);
+                    tail.pop_front();
+                    self.rxqueue.append(&mut tail);
+                    return Ok(ret);
+                }
+                Reply::Disconnect => {
+                    return Err(Error::msg("remote end disconnected"));
+                }
+                _ => {
+                    debug!("Remote end send unexpected data {}", payload.description());
+                }
             }
         }
 

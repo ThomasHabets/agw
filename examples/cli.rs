@@ -63,11 +63,25 @@ fn main() -> Result<()> {
             &msg.into_bytes(),
         )?,
         Command::Connect { src, dst } => {
-            let mut con = agw.connect(0, 0, &Call::from_str(&src)?, &Call::from_str(&dst)?, &[])?;
-            eprintln!("Read: {:?}", con.read()?);
-            con.write(b"hello world")?;
+            let src = &Call::from_str(&src)?;
+            agw.register_callsign(0, 0xF0, src);
+            let mut con = agw.connect(0, 0xF0, src, &Call::from_str(&dst)?, &[])?;
+            eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
+            std::thread::sleep(std::time::Duration::from_millis(30000));
+            con.write(b"BYE\r")?;
+            loop {
+                eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
+            }
             con.disconnect()?;
         }
     };
     Ok(())
+}
+
+fn ascii7_to_str(bytes: Vec<u8>) -> String {
+    let mut s = String::new();
+    for b in bytes.iter() {
+        s.push((b & 0x7f) as char);
+    }
+    s
 }
