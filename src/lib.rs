@@ -115,14 +115,6 @@ impl Call {
         Ok(Call { bytes: arr })
     }
 
-    /// Create Call from string. Include SSID.
-    ///
-    /// Max length is 10, because that's the max length in the AGW
-    /// protocol.
-    pub fn from_str(s: &str) -> Result<Call> {
-        Self::from_bytes(s.as_bytes())
-    }
-
     /// Return true if the callsign is empty.
     ///
     /// Sometimes this is the correct thing, for incoming/outgoing AGW
@@ -135,6 +127,13 @@ impl Call {
             }
         }
         true
+    }
+}
+
+impl std::str::FromStr for Call {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_bytes(s.as_bytes())
     }
 }
 
