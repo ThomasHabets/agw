@@ -120,7 +120,7 @@ impl Call {
     /// Max length is 10, because that's the max length in the AGW
     /// protocol.
     pub fn from_str(s: &str) -> Result<Call> {
-        Self::from_bytes(&s.as_bytes())
+        Self::from_bytes(s.as_bytes())
     }
 
     /// Return true if the callsign is empty.
@@ -175,7 +175,7 @@ enum Reply {
 impl Reply {
     fn description(&self) -> String {
         match self {
-            Reply::Disconnect => format!("Disconnect"),
+            Reply::Disconnect => "Disconnect".to_string(),
             Reply::ConnectedData(data) => format!("ConnectedData: {:?}", data),
             Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
             Reply::Unproto(data) => format!("Received unproto: {:?}", data),
@@ -187,8 +187,8 @@ impl Reply {
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
             Reply::FramesOutstandingPort(n) => format!("Frames outstanding port: {n}"),
             Reply::FramesOutstandingConnection(n) => format!("Frames outstanding connection: {n}"),
-            Reply::MonitorConnected(_) => format!("Connected packet"),
-            Reply::MonitorSupervisory(_) => format!("Supervisory packet"),
+            Reply::MonitorConnected(x) => format!("Connected packet len {}", x.len()),
+            Reply::MonitorSupervisory(x) => format!("Supervisory packet len {}", x.len()),
             Reply::HeardStations(s) => format!("Heard stations: {s}"),
             Reply::Unknown(h, data) => format!("Unknown reply: header={h:?} data={data:?}"),
         }
@@ -399,8 +399,8 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
         port: header[0],
         data_kind: header[4],
         pid: header[6],
-        src: src,
-        dst: dst,
+        src,
+        dst,
         data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
     })
 }
@@ -457,13 +457,14 @@ impl AGW {
     fn writer(mut stream: TcpStream, rx: mpsc::Receiver<Vec<u8>>) -> Result<()> {
         loop {
             let buf = rx.recv()?;
-            stream.write(&buf)?;
+            // TODO: do full write.
+            let _ = stream.write(&buf)?;
         }
     }
 
     fn reader(mut stream: TcpStream, tx: mpsc::Sender<(Header, Reply)>) -> Result<()> {
         loop {
-            let mut header = [0 as u8; HEADER_LEN];
+            let mut header = [0_u8; HEADER_LEN];
             stream.read_exact(&mut header)?;
             let header = parse_header(&header)?;
             let payload = if header.data_len > 0 {
@@ -559,7 +560,7 @@ impl AGW {
         dst: &Call,
         via: &[Call],
     ) -> Result<Connection<'a>> {
-        if via.len() == 0 {
+        if via.is_empty() {
             self.send(&connect(port, pid, src, dst)?)?;
         } else {
             self.send(&connect_via(port, pid, src, dst, via)?)?;
