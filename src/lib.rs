@@ -119,6 +119,8 @@ impl Call {
     ///
     /// Max length is 10, because that's the max length in the AGW
     /// protocol.
+    // TODO: Temporarily disable clippy.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Call> {
         Self::from_bytes(s.as_bytes())
     }

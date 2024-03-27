@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+export RUSTFLAGS="--deny warnings"
+
+cargo fmt -- --check || {
+    echo "Run: cargo fmt" >&2
+    exit 1
+}
+cargo test || {
+    echo "Tests fail without features" >&2
+    exit 1
+}
+cargo test --all-features || {
+    echo "Tests fail with features" >&2
+    exit 1
+}
+
+# TODO: maybe add --all-targets
+cargo +nightly 2>/dev/null > /dev/null && {
+    cargo +nightly bench --no-run || {
+	echo "Benchmark builds fail" >&2
+	exit 1
+    }
+    cargo +nightly clippy -- -D warnings || {
+	echo "Clippy fail" >&2
+	exit 1
+    }
+} || echo "Skipping nightly, because not installed"
+exit 0
