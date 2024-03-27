@@ -122,10 +122,18 @@ fn main() -> Result<()> {
     // up
     let make_writer = con.make_writer();
     let up_thread = std::thread::spawn(move || loop {
-        let data = up_rx.recv().unwrap();
-        let data = data.as_bytes();
-        let data = make_writer.make(data);
-        sender.send(data).unwrap();
+        match up_rx.recv() {
+            Ok(data) => {
+                let data = data.as_bytes();
+                let data = make_writer.make(data);
+                sender.send(data).unwrap();
+            }
+            Err(e) => {
+                // UI exited.
+                debug!("UI exited, up_rx got {}", e);
+                return;
+            }
+        };
     });
     // down
     loop {
