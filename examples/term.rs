@@ -98,6 +98,13 @@ struct Cli {
     #[clap(short, default_value = "0")]
     verbose: usize,
 
+    #[clap(short, default_value = "0")]
+    port: u8,
+
+    // 240 = 0xF0
+    #[clap(short = 'P', default_value = "240")]
+    pid: u8,
+
     #[clap(short = 'c', default_value = "127.0.0.1:8010")]
     agw_addr: String,
 
@@ -115,8 +122,8 @@ fn main() -> Result<()> {
     let mut agw = agw::AGW::new(&opt.agw_addr)?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
-    agw.register_callsign(0, 0xF0, src)?;
-    let mut con = agw.connect(0, 0xF0, src, dst, &[])?;
+    agw.register_callsign(opt.port, opt.pid, src)?;
+    let mut con = agw.connect(opt.port, opt.pid, src, dst, &[])?;
 
     let sender = con.sender();
     // up
