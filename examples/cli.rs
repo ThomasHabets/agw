@@ -31,6 +31,9 @@ struct Cli {
     #[clap(short, default_value = "0")]
     verbose: usize,
 
+    #[clap(short, default_value = "0")]
+    port: u8,
+
     #[clap(short = 'c', default_value = "127.0.0.1:8010")]
     agw_addr: String,
 }
@@ -55,17 +58,21 @@ fn main() -> Result<()> {
         }
         Command::PortInfo { port } => eprintln!("{}", agw.port_info(port)?),
         Command::PortCap { port } => eprintln!("{}", agw.port_cap(port)?),
-        Command::Unproto { src, dst, msg } => agw.unproto(
-            0,
-            0xF0,
-            &Call::from_str(&src)?,
-            &Call::from_str(&dst)?,
-            &msg.into_bytes(),
-        )?,
+        Command::Unproto { src, dst, msg } => {
+            let pid = 0xF0; // TODO: make a flag.
+            agw.unproto(
+                opt.port,
+                pid,
+                &Call::from_str(&src)?,
+                &Call::from_str(&dst)?,
+                &msg.into_bytes(),
+            )?;
+        }
         Command::Connect { src, dst } => {
+            let pid = 0xF0; // TODO: make a flag.
             let src = &Call::from_str(&src)?;
-            agw.register_callsign(0, 0xF0, src);
-            let mut con = agw.connect(0, 0xF0, src, &Call::from_str(&dst)?, &[])?;
+            agw.register_callsign(opt.port, pid, src);
+            let mut con = agw.connect(opt.port, pid, src, &Call::from_str(&dst)?, &[])?;
             eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
             std::thread::sleep(std::time::Duration::from_millis(30000));
             con.write(b"BYE\r")?;
