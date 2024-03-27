@@ -76,7 +76,7 @@ fn main() -> Result<()> {
             eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
             std::thread::sleep(std::time::Duration::from_millis(30000));
             con.write(b"BYE\r")?;
-            loop {
+            for _ in 0..10 {
                 eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
             }
             con.disconnect()?;
