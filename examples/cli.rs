@@ -2,6 +2,7 @@ use agw::Call;
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
+use std::str::FromStr;
 
 #[derive(Subcommand, Debug)]
 enum Command {

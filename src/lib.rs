@@ -1,9 +1,11 @@
-use anyhow::{Error, Result};
-use log::{debug, warn};
 use std::collections::LinkedList;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::str::FromStr;
 use std::sync::mpsc;
+
+use anyhow::{Error, Result};
+use log::{debug, warn};
 
 fn port_info(port: u8) -> Vec<u8> {
     Header::new(port, b'G', 0, None, None, 0)
@@ -115,16 +117,6 @@ impl Call {
         Ok(Call { bytes: arr })
     }
 
-    /// Create Call from string. Include SSID.
-    ///
-    /// Max length is 10, because that's the max length in the AGW
-    /// protocol.
-    // TODO: Temporarily disable clippy.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Result<Call> {
-        Self::from_bytes(s.as_bytes())
-    }
-
     /// Return true if the callsign is empty.
     ///
     /// Sometimes this is the correct thing, for incoming/outgoing AGW
@@ -137,6 +129,13 @@ impl Call {
             }
         }
         true
+    }
+}
+
+impl FromStr for Call {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_bytes(s.as_bytes())
     }
 }
 

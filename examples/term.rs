@@ -1,12 +1,15 @@
-use agw::Call;
-use anyhow::Result;
-use clap::Parser;
 use cursive::align::Align;
 use cursive::theme::{Color, ColorStyle, ColorType};
 use cursive::view::{Nameable, Resizable, ScrollStrategy};
 use cursive::views::{Dialog, EditView, LinearLayout, ScrollView, TextContent, TextView};
-use log::debug;
+use std::str::FromStr;
 use std::sync::mpsc;
+
+use anyhow::Result;
+use clap::Parser;
+use log::debug;
+
+use agw::Call;
 
 fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
     let mut siv = cursive::default();
