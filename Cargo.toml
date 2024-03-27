@@ -16,6 +16,7 @@ log = "0.4.21"
 
 [dev-dependencies]
 stderrlog = "0.6.0"
+simple-logging = "2.0.2"
 clap = { version = "4.5.3", features = ["derive"] }
 
 [lib]

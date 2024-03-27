@@ -97,9 +97,13 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
 }
 
 #[derive(Parser, Debug)]
-struct Cli {
+struct Opts {
+    // 0 -> Error 1 -> Warn 2 -> Info 3 -> Debug 4 or higher -> Trace
     #[clap(short, default_value = "0")]
     verbose: usize,
+
+    #[clap(short)]
+    log: Option<String>,
 
     #[clap(short, default_value = "0")]
     port: u8,
@@ -116,7 +120,19 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let opt = Cli::parse();
+    let opt = Opts::parse();
+
+    if let Some(log) = opt.log {
+        let level = match opt.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Warn,
+            2 => log::LevelFilter::Info,
+            3 => log::LevelFilter::Debug,
+            _ => log::LevelFilter::Trace,
+        };
+        simple_logging::log_to_file(log, level)?;
+    }
+    log::info!("Terminal starting");
 
     let (up_tx, up_rx) = mpsc::channel();
     let (down_tx, down_rx) = mpsc::channel();
