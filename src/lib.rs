@@ -81,6 +81,11 @@ fn make_unproto(port: u8, pid: u8, src: &Call, dst: &Call, data: &[u8]) -> Resul
     Ok([h, data.to_vec()].concat())
 }
 
+/** Callsign, including SSID.
+
+Max length is 10, because that's the max length in the AGW
+protocol.
+ */
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     bytes: [u8; 10],
@@ -109,10 +114,20 @@ impl Call {
         }
         Ok(Call { bytes: arr })
     }
+
+    /// Create Call from string. Include SSID.
+    ///
+    /// Max length is 10, because that's the max length in the AGW
+    /// protocol.
     pub fn from_str(s: &str) -> Result<Call> {
         Self::from_bytes(&s.as_bytes())
     }
 
+    /// Return true if the callsign is empty.
+    ///
+    /// Sometimes this is the correct thing, for incoming/outgoing AGW
+    /// packets. E.g. querying the outgoing packet queue does not have
+    /// source nor destination.
     pub fn is_empty(&self) -> bool {
         for b in self.bytes {
             if b != 0 {
@@ -238,6 +253,9 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     })
 }
 
+/// AX.25 connection object.
+///
+/// Created from an AGW object, using `.connect()`.
 pub struct Connection<'a> {
     port: u8,
     pid: u8,
@@ -247,6 +265,11 @@ pub struct Connection<'a> {
     disconnected: bool,
 }
 
+/// An object that has all the metadata needed to be able to create
+/// AGW "write some stuff on the established connection", without
+/// owning the whole connection object.
+///
+/// See examples/term.rs for example use.
 pub struct MakeWriter {
     port: u8,
     pid: u8,
@@ -254,6 +277,7 @@ pub struct MakeWriter {
     dst: Call,
 }
 impl MakeWriter {
+    /// Make the bytes of an AGW packet to send a packet of data.
     pub fn make(&self, data: &[u8]) -> Vec<u8> {
         write_connected(self.port, self.pid, &self.src, &self.dst, data).unwrap()
     }
@@ -271,13 +295,19 @@ impl<'a> Connection<'a> {
         }
     }
 
+    /// Read user data from the connection.
     pub fn read(&mut self) -> Result<Vec<u8>> {
         self.agw.read_connected(&self.src, &self.dst)
     }
+
+    /// Write data to the connection.
     pub fn write(&mut self, data: &[u8]) -> Result<usize> {
         self.agw
             .write_connected(self.port, self.pid, &self.src, &self.dst, data)
     }
+
+    /// Create MakeWriter object, in order to create AGW packets
+    /// without holding on to a connection.
     pub fn make_writer(&self) -> MakeWriter {
         MakeWriter {
             port: self.port,
@@ -286,9 +316,15 @@ impl<'a> Connection<'a> {
             dst: self.dst.clone(),
         }
     }
+
+    /// Return a copy of the mpsc to send bytes on the AGW connection.
+    ///
+    /// TODO: this should probably be abstracted away.
     pub fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
         self.agw.sender()
     }
+
+    /// Disconnect the connection.
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
             debug!("disconnecting");
@@ -369,6 +405,7 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
     })
 }
 
+/// AGW connection.
 pub struct AGW {
     rx: mpsc::Receiver<(Header, Reply)>,
 
@@ -382,6 +419,7 @@ pub struct AGW {
 }
 
 impl AGW {
+    /// Create AGW connection to ip:port.
     pub fn new(addr: &str) -> Result<AGW> {
         let (tx, rx) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
@@ -411,7 +449,8 @@ impl AGW {
         self.tx.send(msg.to_vec())?;
         Ok(())
     }
-    pub fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
+
+    fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
         self.tx.clone()
     }
 
@@ -449,6 +488,7 @@ impl AGW {
         }
     }
 
+    /// Get the version of the AGW endpoint.
     pub fn version(&mut self) -> Result<(u16, u16)> {
         self.send(&version_info())?;
         loop {
@@ -459,6 +499,8 @@ impl AGW {
             }
         }
     }
+
+    /// Get some port info for the AGW endpoint.
     pub fn port_info(&mut self, port: u8) -> Result<String> {
         self.send(&port_info(port))?;
         loop {
@@ -469,6 +511,8 @@ impl AGW {
             }
         }
     }
+
+    /// Get port capabilities of the AGW "port".
     pub fn port_cap(&mut self, port: u8) -> Result<String> {
         self.send(&port_cap(port))?;
         loop {
@@ -480,6 +524,7 @@ impl AGW {
         }
     }
 
+    /// Send UI packet.
     pub fn unproto(
         &mut self,
         port: u8,
@@ -492,12 +537,20 @@ impl AGW {
         Ok(())
     }
 
+    /// Register callsign.
+    ///
+    /// The specs say that registering the callsign is
+    /// mandatory. Direwolf doesn't seem to care, but there it is.
+    ///
+    /// Presumably needed for incoming connection, but incoming
+    /// connections are not tested yet.
     pub fn register_callsign(&mut self, port: u8, pid: u8, src: &Call) -> Result<()> {
         debug!("Registering callsign");
         self.send(&register_callsign(port, pid, src)?)?;
         Ok(())
     }
 
+    /// Create a new connection.
     pub fn connect<'a>(
         &'a mut self,
         port: u8,
