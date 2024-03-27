@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         Command::Connect { src, dst } => {
             let pid = 0xF0; // TODO: make a flag.
             let src = &Call::from_str(&src)?;
-            agw.register_callsign(opt.port, pid, src);
+            agw.register_callsign(opt.port, pid, src)?;
             let mut con = agw.connect(opt.port, pid, src, &Call::from_str(&dst)?, &[])?;
             eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
             std::thread::sleep(std::time::Duration::from_millis(30000));
