@@ -5,7 +5,7 @@ use cursive::views::{Dialog, EditView, LinearLayout, ScrollView, TextContent, Te
 use std::str::FromStr;
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::Parser;
 use log::debug;
 
@@ -99,8 +99,9 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
 #[derive(Parser, Debug)]
 struct Opts {
     // 0 -> Error 1 -> Warn 2 -> Info 3 -> Debug 4 or higher -> Trace
-    #[clap(short, default_value = "0")]
-    verbose: usize,
+    // Default to INFO, because it won't log without being provided a logfile anyway.
+    #[clap(short, default_value = "info")]
+    verbose: String,
 
     #[clap(short)]
     log: Option<String>,
@@ -122,15 +123,37 @@ struct Opts {
 fn main() -> Result<()> {
     let opt = Opts::parse();
 
-    if let Some(log) = opt.log {
-        let level = match opt.verbose {
-            0 => log::LevelFilter::Error,
-            1 => log::LevelFilter::Warn,
-            2 => log::LevelFilter::Info,
-            3 => log::LevelFilter::Debug,
-            _ => log::LevelFilter::Trace,
+    if let Some(logf) = opt.log {
+        use std::io::Write;
+        let target = Box::new(std::fs::File::create(logf).expect("Can't create log file {logf}"));
+        let level = match opt.verbose.as_str() {
+            "err" | "error" => log::LevelFilter::Error,
+            "warn" | "warning" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            l => return Err(Error::msg(format!("Invalid log level {l}"))),
         };
-        simple_logging::log_to_file(log, level)?;
+        env_logger::Builder::new()
+            .format(move |buf, record| {
+                // ISO8601 / RFC3339 time format.
+                const RFC3339: &'static str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
+                writeln!(
+                    buf,
+                    "{} {} {} {}:{} {}",
+                    chrono::Local::now().format(RFC3339),
+                    record.level(),
+                    record.module_path().unwrap_or("unknown"),
+                    record.file().unwrap_or("unknown"),
+                    record.line().unwrap_or(0),
+                    record.args()
+                )
+            })
+            .filter(Some(module_path!()), level)
+            .filter(Some("agw"), level)
+            .write_style(env_logger::WriteStyle::Never)
+            .target(env_logger::Target::Pipe(target))
+            .init();
     }
     log::info!("Terminal starting");
 
