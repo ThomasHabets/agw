@@ -279,8 +279,11 @@ pub struct MakeWriter {
 }
 impl MakeWriter {
     /// Make the bytes of an AGW packet to send a packet of data.
-    pub fn make(&self, data: &[u8]) -> Vec<u8> {
-        write_connected(self.port, self.pid, &self.src, &self.dst, data).unwrap()
+    pub fn data(&self, data: &[u8]) -> Result<Vec<u8>> {
+        write_connected(self.port, self.pid, &self.src, &self.dst, data)
+    }
+    pub fn disconnect(&self) -> Result<Vec<u8>> {
+        disconnect(self.port, self.pid, &self.src, &self.dst)
     }
 }
 
@@ -422,6 +425,7 @@ pub struct AGW {
 impl AGW {
     /// Create AGW connection to ip:port.
     pub fn new(addr: &str) -> Result<AGW> {
+        debug!("Creating AGW to {addr}");
         let (tx, rx) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
         let wstream = TcpStream::connect(addr)?;
@@ -477,7 +481,11 @@ impl AGW {
             };
             let reply = parse_reply(&header, &payload)?;
             debug!("Got reply: {}", reply.description());
+            let done = matches!(reply, Reply::Disconnect);
             tx.send((header, reply))?;
+            if done {
+                break Ok(());
+            }
         }
     }
 

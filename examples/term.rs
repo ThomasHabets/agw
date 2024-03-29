@@ -174,25 +174,38 @@ fn main() -> Result<()> {
         match up_rx.recv() {
             Ok(data) => {
                 let data = data.as_bytes();
-                let data = make_writer.make(data);
+                let data = make_writer
+                    .data(data)
+                    .expect("failed to create user data packet");
                 sender.send(data).unwrap();
             }
             Err(e) => {
                 // UI exited.
                 debug!("UI exited, up_rx got {}", e);
+                sender
+                    .send(make_writer.disconnect().unwrap())
+                    .expect("failed to send disconnect");
                 return;
             }
         };
     });
     // down
     loop {
-        let read = con.read().expect("connection read");
+        let read = match con.read() {
+            Ok(data) => data,
+            Err(e) => {
+                debug!("Connection read: {e}");
+                // TODO: update connected status box.
+                break;
+            }
+        };
         if let Err(e) = down_tx.send(ascii7_to_str(read)) {
             debug!("down_tx failed: {}", e);
             break;
         }
     }
-    up_thread.join().expect("down_thread join failed");
+    debug!("Joining UI and upload threads");
+    up_thread.join().expect("up_thread join failed");
     ui_thread.join().expect("thread not to crash");
     Ok(())
 }
