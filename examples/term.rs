@@ -7,11 +7,15 @@ use std::sync::mpsc;
 
 use anyhow::{Error, Result};
 use clap::Parser;
-use log::debug;
+use log::{debug, error};
 
 use agw::Call;
 
-fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
+fn run_ui(
+    up_tx: mpsc::Sender<String>,
+    down_rx: mpsc::Receiver<String>,
+    status_rx: mpsc::Receiver<String>,
+) {
     let mut siv = cursive::default();
     siv.set_fps(10);
     // siv.add_global_callback('q', |s| s.quit());
@@ -24,6 +28,10 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
             content2.append(c);
         }
     });
+
+    let status = TextContent::new("");
+    let status2 = status.clone();
+
     siv.set_window_title("AGW Terminal");
     siv.with_theme(|t| {
         //t.shadow = false;
@@ -46,10 +54,9 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
         t.palette[Primary] = Dark(White);
         t.palette[TitlePrimary] = Rgb(255, 0, 0);
     });
-
     siv.add_fullscreen_layer(
         LinearLayout::vertical()
-            .child(Dialog::around(TextView::new("Connected or not?")).title("Status"))
+            .child(Dialog::around(TextView::new_with_content(status)).title("Status"))
             .child(
                 ScrollView::new(
                     TextView::new_with_content(initial_content)
@@ -74,7 +81,7 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
                                     content.append(text.to_owned() + "\n");
                                 }
                             }
-                            up_tx.send(text.to_owned() + "\r").unwrap();
+                            up_tx.send(text.to_owned() + "\r").expect("Sending command");
                             s.call_on_name("edit", |e: &mut EditView| {
                                 e.set_content("");
                             })
@@ -93,6 +100,16 @@ fn run_ui(up_tx: mpsc::Sender<String>, down_rx: mpsc::Receiver<String>) {
             )
             .full_screen(),
     );
+    std::thread::spawn(move || {
+        std::panic::set_hook(Box::new(|panic_info| {
+            let backtrace = backtrace::Backtrace::new();
+            error!("Status update thread panic: {panic_info:?}. Backtrace:");
+            error!("{:?}", backtrace);
+        }));
+        for c in status_rx {
+            status2.set_content(ascii7_to_str(c.as_bytes()));
+        }
+    });
     siv.run();
 }
 
@@ -159,14 +176,25 @@ fn main() -> Result<()> {
 
     let (up_tx, up_rx) = mpsc::channel();
     let (down_tx, down_rx) = mpsc::channel();
-    let ui_thread = std::thread::spawn(move || run_ui(up_tx, down_rx));
+    let (status_tx, status_rx) = mpsc::channel();
 
     let mut agw = agw::AGW::new(&opt.agw_addr)?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
     agw.register_callsign(opt.port, opt.pid, src)?;
     let mut con = agw.connect(opt.port, opt.pid, src, dst, &[])?;
-
+    let initial_status: String = con.connect_string().into();
+    status_tx
+        .send(initial_status)
+        .expect("sending initial status");
+    let ui_thread = std::thread::spawn(move || {
+        std::panic::set_hook(Box::new(|panic_info| {
+            let backtrace = backtrace::Backtrace::new();
+            error!("UI thread panic: {panic_info:?}. Backtrace:");
+            error!("{:?}", backtrace);
+        }));
+        run_ui(up_tx, down_rx, status_rx)
+    });
     let sender = con.sender();
     // up
     let make_writer = con.make_writer();
@@ -177,13 +205,13 @@ fn main() -> Result<()> {
                 let data = make_writer
                     .data(data)
                     .expect("failed to create user data packet");
-                sender.send(data).unwrap();
+                sender.send(data).expect("sending command");
             }
             Err(e) => {
                 // UI exited.
-                debug!("UI exited, up_rx got {}", e);
+                debug!("UI exited, up_rx got: {}", e);
                 sender
-                    .send(make_writer.disconnect().unwrap())
+                    .send(make_writer.disconnect().expect("sending disconnect"))
                     .expect("failed to send disconnect");
                 return;
             }
@@ -194,27 +222,33 @@ fn main() -> Result<()> {
         let read = match con.read() {
             Ok(data) => data,
             Err(e) => {
+                let _ = status_tx.send("Connection closed".into());
                 debug!("Connection read: {e}");
                 // TODO: update connected status box.
                 break;
             }
         };
-        if let Err(e) = down_tx.send(ascii7_to_str(read)) {
+        if let Err(e) = down_tx.send(ascii7_to_str(&read)) {
             debug!("down_tx failed: {}", e);
             break;
         }
     }
     debug!("Joining UI and upload threads");
     up_thread.join().expect("up_thread join failed");
-    ui_thread.join().expect("thread not to crash");
+    if let Err(e) = ui_thread.join() {
+        error!("UI thread crashed: {e:?}");
+    }
     Ok(())
 }
 
 // TODO: smarter
-fn ascii7_to_str(bytes: Vec<u8>) -> String {
+fn ascii7_to_str(bytes: &[u8]) -> String {
     let mut s = String::new();
     for b in bytes.iter() {
-        s.push((b & 0x7f) as char);
+        match b {
+            0 => {}
+            b => s.push((b & 0x7f) as char),
+        };
     }
     s
 }

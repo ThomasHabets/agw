@@ -143,11 +143,11 @@ impl std::fmt::Display for Call {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (n, ch) in self.bytes.iter().enumerate() {
             if *ch == 0 {
-                let s = String::from_utf8(self.bytes[..n].to_vec()).unwrap();
+                let s = String::from_utf8(self.bytes[..n].to_vec()).expect("parsing string");
                 return write!(f, "{s}");
             }
         }
-        let s = String::from_utf8(self.bytes.to_vec()).unwrap();
+        let s = String::from_utf8(self.bytes.to_vec()).expect("parsing string");
         write!(f, "{s}")
     }
 }
@@ -228,7 +228,8 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             let slot_time = data[5];
             let max_frame = data[6];
             let active_connections = data[7];
-            let bytes_per_2min = u32::from_le_bytes(data[8..12].try_into().unwrap());
+            let bytes_per_2min =
+                u32::from_le_bytes(data[8..12].try_into().expect("can't happen: bytes to u32"));
 
             Reply::PortCaps(format![
                 "rate={rate}
@@ -242,28 +243,18 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
   bytes_per_2min={bytes_per_2min}"
             ])
         }
-        b'y' => Reply::FramesOutstandingPort(u32::from_le_bytes(data[0..4].try_into().unwrap())),
-        b'Y' => {
-            Reply::FramesOutstandingConnection(u32::from_le_bytes(data[0..4].try_into().unwrap()))
-        }
+        b'y' => Reply::FramesOutstandingPort(u32::from_le_bytes(
+            data[0..4].try_into().expect("can't happen: bytes to u32"),
+        )),
+        b'Y' => Reply::FramesOutstandingConnection(u32::from_le_bytes(
+            data[0..4].try_into().expect("can't happen: bytes to u32"),
+        )),
         b'H' => Reply::HeardStations(std::str::from_utf8(data)?.to_string()),
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
         b'K' => Reply::Raw(data.to_vec()),
         _ => Reply::Unknown(header.clone(), data.to_vec()),
     })
-}
-
-/// AX.25 connection object.
-///
-/// Created from an AGW object, using `.connect()`.
-pub struct Connection<'a> {
-    port: u8,
-    pid: u8,
-    src: Call,
-    dst: Call,
-    agw: &'a mut AGW,
-    disconnected: bool,
 }
 
 /// An object that has all the metadata needed to be able to create
@@ -287,16 +278,42 @@ impl MakeWriter {
     }
 }
 
+/// AX.25 connection object.
+///
+/// Created from an AGW object, using `.connect()`.
+pub struct Connection<'a> {
+    port: u8,
+    connect_string: String,
+    pid: u8,
+    src: Call,
+    dst: Call,
+    agw: &'a mut AGW,
+    disconnected: bool,
+}
+
 impl<'a> Connection<'a> {
-    fn new(agw: &'a mut AGW, port: u8, pid: u8, src: Call, dst: Call) -> Connection {
+    fn new(
+        agw: &'a mut AGW,
+        port: u8,
+        connect_string: String,
+        pid: u8,
+        src: Call,
+        dst: Call,
+    ) -> Connection {
         Connection {
             port,
+            connect_string,
             pid,
             src,
             dst,
             agw,
             disconnected: false,
         }
+    }
+
+    /// Return the connect string.
+    pub fn connect_string(&self) -> &str {
+        &self.connect_string
     }
 
     /// Read user data from the connection.
@@ -405,7 +422,11 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
         pid: header[6],
         src,
         dst,
-        data_len: u32::from_le_bytes(header[28..32].try_into().unwrap()),
+        data_len: u32::from_le_bytes(
+            header[28..32]
+                .try_into()
+                .expect("can't happen: bytes to u32"),
+        ),
     })
 }
 
@@ -575,6 +596,7 @@ impl AGW {
             self.send(&connect_via(port, pid, src, dst, via)?)?;
             todo!();
         }
+        let connect_string;
         loop {
             let (head, r) = self.rx.recv()?;
             if head.src.as_ref().map_or(true, |x| x != dst)
@@ -585,13 +607,21 @@ impl AGW {
             }
             match r {
                 Reply::Connected(i) => {
+                    connect_string = i.clone();
                     debug!("Connected from {src} to {dst} with connect string {i}");
                     break;
                 }
                 other => self.rx_enqueue(head, other),
             }
         }
-        Ok(Connection::new(self, port, pid, src.clone(), dst.clone()))
+        Ok(Connection::new(
+            self,
+            port,
+            connect_string,
+            pid,
+            src.clone(),
+            dst.clone(),
+        ))
     }
 
     fn write_connected(
