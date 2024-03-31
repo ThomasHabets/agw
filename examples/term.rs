@@ -1,15 +1,16 @@
+use std::str::FromStr;
+use std::sync::mpsc;
+
+use anyhow::{Error, Result};
+use clap::Parser;
 use cursive::align::Align;
 use cursive::theme::{Color, ColorStyle, ColorType};
 use cursive::view::{Nameable, Resizable, ScrollStrategy};
 use cursive::views::{
     Dialog, EditView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
 };
-use std::str::FromStr;
-use std::sync::mpsc;
-
-use anyhow::{Error, Result};
-use clap::Parser;
 use log::{debug, error};
+use serde::Serialize;
 
 use agw::Call;
 
@@ -132,6 +133,9 @@ struct Opts {
     #[clap(short)]
     log: Option<String>,
 
+    #[clap(short = 'C', default_value = "/dev/null")]
+    cq_log: String,
+
     #[clap(short, default_value = "0")]
     port: u8,
 
@@ -144,6 +148,66 @@ struct Opts {
 
     src: String,
     dst: String,
+}
+
+#[derive(Serialize)]
+struct CQLogEntryMessage {
+    src: String,
+    dst: String,
+    data: String,
+}
+
+#[derive(Serialize)]
+struct CQLogEntryMeta {
+    msg: String,
+}
+
+#[derive(Serialize)]
+struct CQLogEntry {
+    timestamp: chrono::DateTime<chrono::Local>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<CQLogEntryMeta>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<CQLogEntryMessage>,
+}
+impl CQLogEntry {
+    fn meta(msg: String) -> Self {
+        Self {
+            timestamp: chrono::Local::now(),
+            message: None,
+            meta: Some(CQLogEntryMeta { msg }),
+        }
+    }
+    fn message(m: CQLogEntryMessage) -> Self {
+        Self {
+            timestamp: chrono::Local::now(),
+            message: Some(m),
+            meta: None,
+        }
+    }
+}
+
+fn cqlogthread_handle(logf: &mut std::fs::File, msg: CQLogEntry) -> Result<()> {
+    use std::io::Write;
+    let serialized = serde_json::to_string(&msg)? + "\n";
+    logf.write_all(serialized.as_bytes())?;
+    Ok(())
+}
+
+fn cqlogthread(mut logf: std::fs::File, rx: mpsc::Receiver<CQLogEntry>) {
+    if let Err(e) = cqlogthread_handle(&mut logf, CQLogEntry::meta("Log opening".into())) {
+        error!("Failed to log: {e}");
+    }
+    for msg in rx {
+        if let Err(e) = cqlogthread_handle(&mut logf, msg) {
+            error!("Failed to log: {e}");
+        }
+    }
+    if let Err(e) = cqlogthread_handle(&mut logf, CQLogEntry::meta("Log closing".into())) {
+        error!("Failed to log: {e}");
+    }
 }
 
 fn main() -> Result<()> {
@@ -183,6 +247,16 @@ fn main() -> Result<()> {
     }
     log::info!("Terminal starting");
 
+    let cqlogfile = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(opt.cq_log)?;
+
+    let (cq_tx, cq_rx) = mpsc::channel();
+    let cqloghandle = std::thread::spawn(move || {
+        cqlogthread(cqlogfile, cq_rx);
+    });
+
     let (up_tx, up_rx) = mpsc::channel();
     let (down_tx, down_rx) = mpsc::channel();
     let (status_tx, status_rx) = mpsc::channel();
@@ -207,14 +281,24 @@ fn main() -> Result<()> {
     let sender = con.sender();
     // up
     let make_writer = con.make_writer();
+
+    let cq_tx2 = cq_tx.clone();
+    let src2 = opt.src.clone();
+    let dst2 = opt.dst.clone();
+
     let up_thread = std::thread::spawn(move || loop {
         match up_rx.recv() {
             Ok(data) => {
-                let data = data.as_bytes();
-                let data = make_writer
-                    .data(data)
+                let bdata = data.as_bytes();
+                let bdata = make_writer
+                    .data(bdata)
                     .expect("failed to create user data packet");
-                sender.send(data).expect("sending command");
+                let _ = cq_tx2.send(CQLogEntry::message(CQLogEntryMessage {
+                    src: src2.clone(),
+                    dst: dst2.clone(),
+                    data: data,
+                }));
+                sender.send(bdata).expect("sending command");
             }
             Err(e) => {
                 // UI exited.
@@ -237,7 +321,14 @@ fn main() -> Result<()> {
                 break;
             }
         };
-        if let Err(e) = down_tx.send(ascii7_to_str(&read)) {
+        let plain = ascii7_to_str(&read);
+        cq_tx.send(CQLogEntry::message(CQLogEntryMessage {
+            src: opt.dst.clone(),
+            dst: opt.src.clone(),
+            data: plain.clone(),
+        }))?;
+
+        if let Err(e) = down_tx.send(plain) {
             debug!("down_tx failed: {}", e);
             break;
         }
@@ -247,6 +338,8 @@ fn main() -> Result<()> {
     if let Err(e) = ui_thread.join() {
         error!("UI thread crashed: {e:?}");
     }
+    drop(cq_tx);
+    cqloghandle.join().expect("CQ log thread failed");
     Ok(())
 }
 
