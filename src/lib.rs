@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::mpsc;
 
 use anyhow::{Error, Result};
-use log::{debug, warn};
+use log::{debug, trace, warn};
 
 fn port_info(port: u8) -> Vec<u8> {
     Header::new(port, b'G', 0, None, None, 0)
@@ -501,7 +501,7 @@ impl AGW {
                 Vec::new()
             };
             let reply = parse_reply(&header, &payload)?;
-            debug!("Got reply: {}", reply.description());
+            trace!("Got reply: {}", reply.description());
             let done = matches!(reply, Reply::Disconnect);
             tx.send((header, reply))?;
             if done {
