@@ -1,7 +1,9 @@
 use cursive::align::Align;
 use cursive::theme::{Color, ColorStyle, ColorType};
 use cursive::view::{Nameable, Resizable, ScrollStrategy};
-use cursive::views::{Dialog, EditView, LinearLayout, ScrollView, TextContent, TextView};
+use cursive::views::{
+    Dialog, EditView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
+};
 use std::str::FromStr;
 use std::sync::mpsc;
 
@@ -25,6 +27,9 @@ fn run_ui(
     let initial_content = content.clone();
     std::thread::spawn(move || {
         for c in down_rx {
+            // TODO: if adding new stuff, and not at bottom,
+            // create a notification that gets dismissed when
+            // at bottom.
             content2.append(c);
         }
     });
@@ -54,33 +59,37 @@ fn run_ui(
         t.palette[Primary] = Dark(White);
         t.palette[TitlePrimary] = Rgb(255, 0, 0);
     });
+
+    // Scroll view containing the data coming down from the other end.
+    let scr = ScrollView::new(
+        TextView::new_with_content(initial_content)
+            .align(Align::top_left())
+            .style(ColorStyle::new(
+                ColorType::Color(Color::Rgb(200, 200, 200)),
+                ColorType::Color(Color::Rgb(0, 0, 0)),
+            ))
+            .full_height(),
+    )
+    .scroll_strategy(ScrollStrategy::StickToBottom)
+    .on_scroll(|s, _rect| {
+        if let None = s.call_on_name("scroll", |e: &mut ScrollView<ResizedView<TextView>>| {
+            if e.is_at_bottom() {
+                e.set_scroll_strategy(ScrollStrategy::StickToBottom);
+            }
+        }) {
+            error!("Scroll is-at-bottom check callback failed to find the scroll view");
+        }
+    })
+    .with_name("scroll");
+
     siv.add_fullscreen_layer(
         LinearLayout::vertical()
             .child(Dialog::around(TextView::new_with_content(status)).title("Status"))
-            .child(
-                ScrollView::new(
-                    TextView::new_with_content(initial_content)
-                        .align(Align::top_left())
-                        .style(ColorStyle::new(
-                            ColorType::Color(Color::Rgb(200, 200, 200)),
-                            ColorType::Color(Color::Rgb(0, 0, 0)),
-                        ))
-                        .full_height(),
-                )
-                .scroll_strategy(ScrollStrategy::StickToBottom),
-            )
+            .child(scr)
             .child(
                 Dialog::around(
                     EditView::new()
                         .on_submit(move |s, text| {
-                            // TODO: if adding new stuff, and not at bottom,
-                            // create a notification that gets dismissed when
-                            // at bottom.
-                            if false {
-                                for _ in 0..1 {
-                                    content.append(text.to_owned() + "\n");
-                                }
-                            }
                             up_tx.send(text.to_owned() + "\r").expect("Sending command");
                             s.call_on_name("edit", |e: &mut EditView| {
                                 e.set_content("");
