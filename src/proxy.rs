@@ -31,27 +31,36 @@ impl Proxy {
         self.up.send(Packet::VersionQuery)?;
         loop {
             select! {
-            recv(self.down.rx) -> packet => {
-                        debug!("Got {packet:?} from downstream");
-                        let packet = cb_down(packet?);
-                        debug!("Transformed into {packet:?}");
-            },
-            recv(self.up.rx) -> packet => {
-                debug!("Got {packet:?} from up");
-                let packet = cb_up(packet?);
-                debug!("Transformed into {packet:?}");
-            },
-            };
+                recv(self.down.rx) -> packet => {
+                    debug!("Got {packet:?} from downstream");
+            let packet = packet?;
+                    let packet = cb_down(packet);
+                    debug!("… Transformed into {packet:?}");
+                },
+                recv(self.up.rx) -> packet => {
+                    debug!("Got {packet:?} from up");
+                    let packet = cb_up(packet?);
+                    debug!("Transformed into {packet:?}");
+                },
+                };
         }
     }
 }
 
-#[derive(Clone)]
 struct ConnectionV2 {
     rx: Receiver<Packet>,
     tx: Sender<Packet>,
+    rxthread: Option<std::thread::JoinHandle<Result<()>>>,
+    txthread: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
+impl Drop for ConnectionV2 {
+    fn drop(&mut self) {
+        debug!("Awaiting proxy thread shutdown");
+        let _ = self.txthread.take().unwrap().join();
+        let _ = self.rxthread.take().unwrap().join();
+    }
+}
 impl ConnectionV2 {
     fn rx_loop(mut rstream: TcpStream, tx: Sender<Packet>) -> Result<()> {
         loop {
@@ -76,19 +85,22 @@ impl ConnectionV2 {
     fn new(rstream: TcpStream) -> Result<Self> {
         let mut wstream = rstream.try_clone()?;
         let (rxtx, rxrx) = unbounded::<Packet>();
-        std::thread::spawn(move || -> Result<()> {
-            Self::rx_loop(rstream, rxtx).expect("parse thingy failed");
-            Ok(()) // TODO
-        });
+        let rxthread = std::thread::spawn(move || -> Result<()> { Self::rx_loop(rstream, rxtx) });
         let (txtx, txrx) = unbounded::<Packet>();
-        std::thread::spawn(move || {
+        let txthread = std::thread::spawn(move || {
             for packet in txrx {
                 let bytes = packet.serialize();
-                let _ = wstream.write(&bytes).unwrap();
+                let _ = wstream.write(&bytes)?;
                 eprintln!("Send: {bytes:?}");
             }
+            Ok(())
         });
-        Ok(Self { rx: rxrx, tx: txtx })
+        Ok(Self {
+            rxthread: Some(rxthread),
+            txthread: Some(txthread),
+            rx: rxrx,
+            tx: txtx,
+        })
     }
     fn send(&self, packet: Packet) -> Result<(), crossbeam_channel::SendError<Packet>> {
         self.tx.send(packet)
