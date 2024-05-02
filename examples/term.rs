@@ -304,7 +304,7 @@ fn main() -> Result<()> {
                 // UI exited.
                 debug!("UI exited, up_rx got: {}", e);
                 sender
-                    .send(make_writer.disconnect().expect("sending disconnect"))
+                    .send(make_writer.disconnect())
                     .expect("failed to send disconnect");
                 return;
             }
