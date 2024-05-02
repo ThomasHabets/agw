@@ -8,4 +8,4 @@ pub use packet::Packet;
 mod v1;
 pub use v1::*;
 
-// pub mod proxy;
+pub mod proxy;

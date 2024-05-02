@@ -25,6 +25,7 @@ dependencies = [
  "backtrace",
  "chrono",
  "clap",
+ "crossbeam-channel",
  "cursive",
  "env_logger",
  "log",
