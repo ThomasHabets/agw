@@ -40,11 +40,11 @@ fn main() -> Result<()> {
                     s.run(
                         &|packet: Packet| {
                             eprintln!("from server: {packet:?}");
-                            packet
+                            Some(packet)
                         },
                         &|packet: Packet| {
                             eprintln!("from client: {packet:?}");
-                            packet
+                            Some(packet)
                         },
                     )
                     .unwrap();

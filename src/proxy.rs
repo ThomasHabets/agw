@@ -24,25 +24,36 @@ impl Proxy {
     }
     pub fn run(
         &mut self,
-        cb_up: &dyn Fn(Packet) -> Packet,
-        cb_down: &dyn Fn(Packet) -> Packet,
+        cb_up: &dyn Fn(Packet) -> Option<Packet>,
+        cb_down: &dyn Fn(Packet) -> Option<Packet>,
     ) -> Result<()> {
         eprintln!("Running proxy");
         self.up.send(Packet::VersionQuery)?;
         loop {
             select! {
-                recv(self.down.rx) -> packet => {
-                    debug!("Got {packet:?} from downstream");
-            let packet = packet?;
-                    let packet = cb_down(packet);
-                    debug!("… Transformed into {packet:?}");
+                    recv(self.down.rx) -> packet => {
+                        debug!("Got {packet:?} from downstream");
+                match packet {
+                Ok(packet) => {
+                    if let Some(p) = cb_down(packet) {
+                    debug!("… Transformed into {p:?}");
+                    }
                 },
-                recv(self.up.rx) -> packet => {
-                    debug!("Got {packet:?} from up");
-                    let packet = cb_up(packet?);
-                    debug!("Transformed into {packet:?}");
-                },
+                Err(_e) => return Ok(()),
                 };
+                    },
+                    recv(self.up.rx) -> packet => {
+                        debug!("Got {packet:?} from upstream");
+                        match packet {
+                Ok(packet) => {
+                    if let Some(p) = cb_up(packet) {
+                    debug!("Transformed into {p:?}");
+                    }
+                },
+                Err(_e) => return Ok(()),
+                        };
+                    },
+            };
         }
     }
 }
