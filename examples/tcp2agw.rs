@@ -1,5 +1,5 @@
 use agw::{Call, AGW};
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::Parser;
 use log::error;
 use std::io::{Read, Write};
@@ -30,39 +30,42 @@ struct Opt {
     port: u8,
 }
 
-fn bidir(mut con: agw::Connection<'_>, mut stream: std::net::TcpStream) {
+fn bidir(mut con: agw::Connection<'_>, mut stream: std::net::TcpStream) -> Result<()> {
     let sender = con.sender();
     let writer = con.make_writer();
 
     // Up.
-    {
-        let mut stream = stream.try_clone().unwrap();
+    let upthread = {
+        let mut stream = stream.try_clone()?;
         std::thread::spawn(move || loop {
             let mut buf = [0_u8; 1024];
             match stream.read(&mut buf) {
                 Ok(n) => {
-                    let data = &buf[0..n].to_vec();
-                    let data = writer
-                        .data(data)
-                        .expect("failed to create user data packet");
-                    sender.send(data).expect("sending data");
+                    let data = &buf[0..n];
+                    let data = writer.data(data)?;
+                    sender.send(data)?;
                 }
                 Err(e) => {
                     error!("Error reading from TCP: {e:?}");
+                    return Err(Error::msg(format!("TCP stream read: {e:?}")));
                 }
             }
-        });
-    }
+        })
+    };
 
     // Down.
     loop {
         match con.read() {
-            Ok(data) => stream.write_all(&data).unwrap(),
+            Ok(data) => stream.write_all(&data)?,
             Err(e) => {
                 error!("Reading from AGWPE: {e:?} ");
+                break;
             }
         }
     }
+    upthread
+        .join()
+        .map_err(|e| Error::msg(format!("upstream failed: {e:?}")))?
 }
 
 fn main() -> Result<()> {
@@ -77,8 +80,8 @@ fn main() -> Result<()> {
         .unwrap();
 
     let mut agw = AGW::new(&opt.agw_addr)?;
-    let src = &Call::from_str(&opt.src).unwrap();
-    let dst = &Call::from_str(&opt.dst).unwrap();
+    let src = &Call::from_str(&opt.src)?;
+    let dst = &Call::from_str(&opt.dst)?;
     agw.register_callsign(opt.port, opt.pid, &src)?;
     let con = agw.connect(opt.port, opt.pid, src, dst, &[])?;
     //let agw = Arc::new(Mutex::new(agw));
@@ -87,7 +90,7 @@ fn main() -> Result<()> {
     //let stream = stream?;
     let (stream, _) = listener.accept()?;
     //std::thread::spawn(move || {
-    bidir(con, stream);
+    bidir(con, stream)?;
     //});
     //}
     Ok(())
