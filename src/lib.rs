@@ -8,4 +8,5 @@ pub use packet::Packet;
 mod v1;
 pub use v1::*;
 
+pub mod r#async;
 pub mod proxy;
