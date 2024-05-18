@@ -159,15 +159,21 @@ impl AGW {
             },
             tx,
         );
-        self.send(Packet::Connect {
-            port,
-            pid,
-            src: src.clone(),
-            dst: dst.clone(),
-        })
-        .await?;
-        let estab = rx.recv().await.ok_or(Error::msg("TODO"))?;
+        if let Err(e) = self
+            .send(Packet::Connect {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+            })
+            .await
+        {
+            self.router.del(ident);
+            return Err(Error::msg(format!("{e:?}")));
+        }
+        let estab = rx.recv().await.ok_or(Error::msg("TODO"));
         self.router.del(ident);
+        let estab = estab?;
         match estab {
             Packet::ConnectionEstablished {
                 port: _,
