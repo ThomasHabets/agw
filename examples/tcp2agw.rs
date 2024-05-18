@@ -1,10 +1,11 @@
-use agw::{Call, AGW};
-use anyhow::{Error, Result};
+use agw::r#async::{Connection, AGW};
+use agw::{Call, Packet};
+use anyhow::Result;
 use clap::Parser;
-use log::error;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+// use log::error;
 use std::str::FromStr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Parser, Debug)]
 struct Opt {
@@ -30,45 +31,30 @@ struct Opt {
     port: u8,
 }
 
-fn bidir(mut con: agw::Connection<'_>, mut stream: std::net::TcpStream) -> Result<()> {
-    let sender = con.sender();
-    let writer = con.make_writer();
-
-    // Up.
-    let upthread = {
-        let mut stream = stream.try_clone()?;
-        std::thread::spawn(move || loop {
-            let mut buf = [0_u8; 1024];
-            match stream.read(&mut buf) {
-                Ok(n) => {
-                    let data = &buf[0..n];
-                    let data = writer.data(data)?;
-                    sender.send(data)?;
-                }
-                Err(e) => {
-                    error!("Error reading from TCP: {e:?}");
-                    return Err(Error::msg(format!("TCP stream read: {e:?}")));
-                }
-            }
-        })
-    };
-
-    // Down.
+async fn bidir(mut con: Connection<'_>, mut stream: TcpStream) -> Result<()> {
     loop {
-        match con.read() {
-            Ok(data) => stream.write_all(&data)?,
-            Err(e) => {
-                error!("Reading from AGWPE: {e:?} ");
-                break;
-            }
+        let mut buf = [0_u8; 1024];
+        tokio::select! {
+            data = con.recv() => {
+            match data {
+                Ok(Packet::Data{port: _, pid: _, src: _, dst: _, data}) => {
+                stream.write_all(&data).await?;
+                }
+                Ok(_) => {},
+                Err(e) => return Err(e),
+            };
+            },
+            n = stream.read(&mut buf) => {
+            let n = n?;
+            let buf = &buf[0..n];
+            con.send(buf).await?;
+            },
         }
     }
-    upthread
-        .join()
-        .map_err(|e| Error::msg(format!("upstream failed: {e:?}")))?
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let opt = Opt::parse();
     stderrlog::new()
         .module(module_path!())
@@ -79,18 +65,18 @@ fn main() -> Result<()> {
         .init()
         .unwrap();
 
-    let mut agw = AGW::new(&opt.agw_addr)?;
+    let mut agw = AGW::new(&opt.agw_addr).await?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
-    agw.register_callsign(opt.port, opt.pid, &src)?;
-    let con = agw.connect(opt.port, opt.pid, src, dst, &[])?;
+    // agw.register_callsign(opt.port, opt.pid, &src)?;
+    let con = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
     //let agw = Arc::new(Mutex::new(agw));
-    let listener = TcpListener::bind(&opt.listen)?;
+    let listener = TcpListener::bind(&opt.listen).await?;
     //for stream in listener.incoming() {
     //let stream = stream?;
-    let (stream, _) = listener.accept()?;
+    let (stream, _) = listener.accept().await?;
     //std::thread::spawn(move || {
-    bidir(con, stream)?;
+    bidir(con, stream).await?;
     //});
     //}
     Ok(())
