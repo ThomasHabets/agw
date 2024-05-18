@@ -2,7 +2,7 @@ use crate::{Call, Header};
 use anyhow::{Error, Result};
 use log::debug;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Packet {
     VersionQuery,
     VersionReply(u16, u16),
