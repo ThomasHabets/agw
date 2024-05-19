@@ -1,13 +1,31 @@
 use anyhow::{Error, Result};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::{parse_header, Call, Packet, HEADER_LEN};
 
-// TODO: ideally this should self-unregister when ident goes out of
-// scope.
 type RuleIdent = u64;
+
+pub struct RuleHandle {
+    ident: RuleIdent,
+    router: Weak<Router>,
+}
+
+impl RuleHandle {
+    fn new(ident: RuleIdent, router: Weak<Router>) -> Self {
+        Self { ident, router }
+    }
+}
+
+impl Drop for RuleHandle {
+    fn drop(&mut self) {
+        if let Some(router) = self.router.upgrade() {
+            router.del(self.ident);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum RuleMatch {
@@ -54,42 +72,43 @@ impl RuleMatch {
 }
 
 pub struct Router {
-    ident: RuleIdent,
-    rules: Vec<Rule>,
+    ident: Mutex<RuleIdent>,
+    rules: Arc<Mutex<Vec<Rule>>>,
 }
 
 impl Router {
     pub fn new() -> Router {
         Self {
-            ident: 0,
-            rules: Vec::new(),
+            ident: Mutex::new(0),
+            rules: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    pub fn add(&mut self, m: RuleMatch, tx: mpsc::Sender<Packet>) -> RuleIdent {
-        self.ident += 1;
-        self.rules.push(Rule {
-            m,
-            ident: self.ident,
-            tx,
-        });
-        self.ident
+    pub fn add(self: &Arc<Self>, m: RuleMatch, tx: mpsc::Sender<Packet>) -> RuleHandle {
+        let ident = {
+            let mut ident = self.ident.lock().unwrap();
+            *ident += 1;
+            *ident
+        };
+        self.rules.lock().unwrap().push(Rule { m, ident, tx });
+        RuleHandle::new(ident, Arc::downgrade(self))
     }
-    pub fn del(&mut self, ident: RuleIdent) {
+    pub fn del(&self, ident: RuleIdent) {
         // TODO: there has to be a more efficient way.
         //
         // Well, obviously once the rule ident is higher than the
         // `ident`, it will no longer match. Or when it's already
         // matched.
-        self.rules = self
-            .rules
+        let mut rules = self.rules.lock().unwrap();
+        *rules = rules
             .iter()
             .filter(|&r| r.ident != ident)
             .map(|r| r.to_owned())
             .collect();
     }
-    pub async fn process(&mut self, packet: Packet) -> Result<bool> {
+    pub async fn process(&self, packet: Packet) -> Result<bool> {
         let mut any = false;
-        for rule in self.rules.iter() {
+        let rules = self.rules.lock().unwrap().clone();
+        for rule in rules.iter() {
             if rule.m.matches(&packet) {
                 rule.tx.send(packet.clone()).await?;
                 any = true;
@@ -107,14 +126,14 @@ impl Default for Router {
 
 pub struct AGW {
     con: TcpStream,
-    router: Router,
+    router: Arc<Router>,
 }
 
 impl AGW {
     pub async fn new(addr: &str) -> Result<AGW> {
         Ok(Self {
             con: TcpStream::connect(addr).await?,
-            router: Router::new(),
+            router: Arc::new(Router::new()),
         })
     }
     pub async fn send_raw(&mut self, msg: &[u8]) -> Result<(), std::io::Error> {
@@ -168,11 +187,10 @@ impl AGW {
             })
             .await
         {
-            self.router.del(ident);
             return Err(Error::msg(format!("{e:?}")));
         }
         let estab = rx.recv().await.ok_or(Error::msg("TODO"));
-        self.router.del(ident);
+        drop(ident);
         let estab = estab?;
         match estab {
             Packet::ConnectionEstablished {
