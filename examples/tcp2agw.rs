@@ -2,7 +2,7 @@ use agw::r#async::{Connection, AGW};
 use agw::{Call, Packet};
 use anyhow::Result;
 use clap::Parser;
-// use log::error;
+use log::info;
 use std::str::FromStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -40,7 +40,7 @@ async fn bidir(mut con: Connection<'_>, mut stream: TcpStream) -> Result<()> {
                 Ok(Packet::Data{port: _, pid: _, src: _, dst: _, data}) => {
                 stream.write_all(&data).await?;
                 }
-                Ok(_) => {},
+                Ok(other) => info!("Ignoring non-data packet {other:?}"),
                 Err(e) => return Err(e),
             };
             },
