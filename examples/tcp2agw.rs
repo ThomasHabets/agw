@@ -65,11 +65,14 @@ async fn main() -> Result<()> {
         .init()
         .unwrap();
 
-    let mut agw = AGW::new(&opt.agw_addr).await?;
+    let agw = AGW::new(&opt.agw_addr).await?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
     // agw.register_callsign(opt.port, opt.pid, &src)?;
     let con = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
+    if false {
+        let _con2 = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
+    }
     //let agw = Arc::new(Mutex::new(agw));
     let listener = TcpListener::bind(&opt.listen).await?;
     //for stream in listener.incoming() {

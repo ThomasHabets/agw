@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::{parse_header, Call, Packet, HEADER_LEN};
+use crate::{parse_header, Call, Header, Packet, HEADER_LEN};
 
 type RuleIdent = u64;
 
@@ -107,6 +107,8 @@ impl Router {
     }
     pub async fn process(&self, packet: Packet) -> Result<bool> {
         let mut any = false;
+        // TODO: not very efficient, but it avoids holding the lock
+        // cross await.
         let rules = self.rules.lock().unwrap().clone();
         for rule in rules.iter() {
             if rule.m.matches(&packet) {
@@ -124,45 +126,102 @@ impl Default for Router {
     }
 }
 
+struct Pipo {
+    tx: mpsc::Sender<Packet>,
+    rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
+}
+
+enum PIPOState {
+    AwaitHeader,
+    GotHeader(Header),
+}
+
+impl Pipo {
+    async fn new(con: TcpStream) -> Self {
+        let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
+        let (tx2, rx2) = mpsc::channel(10); // TODO: magic number.
+        tokio::spawn(async move {
+            Self::run(con, tx1, rx2).await.expect("Pipo run() failed");
+        });
+        Pipo {
+            tx: tx2,
+            rx: tokio::sync::Mutex::new(rx1),
+        }
+    }
+    async fn send(&self, packet: Packet) -> Result<()> {
+        self.tx.send(packet).await.map_err(|e| anyhow::anyhow!(e))
+    }
+    async fn recv(&self) -> Option<Packet> {
+        self.rx.lock().await.recv().await
+    }
+    async fn run(
+        mut con: TcpStream,
+        tx: mpsc::Sender<Packet>,
+        mut rx: mpsc::Receiver<Packet>,
+    ) -> Result<()> {
+        let mut state = PIPOState::AwaitHeader;
+        loop {
+            match state {
+                PIPOState::AwaitHeader => {
+                    let mut header = [0_u8; HEADER_LEN];
+                    tokio::select! {
+                    // TODO: what happens to partial reads?
+                    ok = con.read_exact(&mut header) => {
+                        ok?;
+                        state = PIPOState::GotHeader(parse_header(&header)?)
+                    },
+                    p = rx.recv() => match p {
+                        Some(p) => con.write_all(&p.serialize()).await?,
+                        // TODO: continue reading even while write
+                        // blocks.
+                        None => return Ok(()),
+                    },
+                    };
+                }
+                PIPOState::GotHeader(ref header) => {
+                    if header.data_len() > 0 {
+                        let mut payload = vec![0; header.data_len() as usize];
+                        tokio::select! {
+                                    ok = con.read_exact(&mut payload) => {
+                        ok?;
+                        let packet = Packet::parse(header, &payload)?;
+                        tx.send(packet).await?;
+                        state = PIPOState::AwaitHeader;
+                                    },
+                                    p = rx.recv() => match p {
+                        Some(p) => con.write_all(&p.serialize()).await?,
+                        // TODO: should we continue receiving
+                        // from con, still?
+                        None => return Ok(()),
+                                    },
+                                };
+                    }
+                }
+            };
+        }
+    }
+}
+
 pub struct AGW {
-    con: TcpStream,
+    con: Pipo,
     router: Arc<Router>,
 }
 
 impl AGW {
     pub async fn new(addr: &str) -> Result<AGW> {
         Ok(Self {
-            con: TcpStream::connect(addr).await?,
+            con: Pipo::new(TcpStream::connect(addr).await?).await,
             router: Arc::new(Router::new()),
         })
     }
-    pub async fn send_raw(&mut self, msg: &[u8]) -> Result<(), std::io::Error> {
-        self.con.write_all(msg).await
+    pub async fn send(&self, data: Packet) -> Result<()> {
+        self.con.send(data).await
     }
-    pub async fn send(&mut self, data: Packet) -> Result<(), std::io::Error> {
-        self.send_raw(&data.serialize()).await
-    }
-    pub async fn route(&mut self) -> Result<()> {
-        loop {
-            let packet = self.read_packet().await?;
-            self.router.process(packet).await?;
-        }
-    }
-    pub async fn read_packet(&mut self) -> Result<Packet> {
-        let mut header = [0_u8; HEADER_LEN];
-        self.con.read_exact(&mut header).await?;
-        let header = parse_header(&header)?;
-        let payload = if header.data_len() > 0 {
-            let mut payload = vec![0; header.data_len() as usize];
-            self.con.read_exact(&mut payload).await?;
-            payload
-        } else {
-            Vec::new()
-        };
-        Packet::parse(&header, &payload)
+    pub async fn recv(&self) -> Option<Packet> {
+        self.con.recv().await
     }
     pub async fn connect<'a>(
-        &'a mut self,
+        &'a self,
         port: u8,
         pid: u8,
         src: &Call,
@@ -223,7 +282,7 @@ pub struct Connection<'a> {
     pid: u8,
     src: Call,
     dst: Call,
-    agw: &'a mut AGW,
+    agw: &'a AGW,
     disconnected: bool,
 }
 
@@ -243,9 +302,6 @@ impl<'a> Connection<'a> {
             dst: self.dst.clone(),
             data: data.to_vec(),
         };
-        self.agw
-            .send(packet)
-            .await
-            .map_err(|e| Error::msg(format!("{e:?}")))
+        self.agw.send(packet).await
     }
 }
