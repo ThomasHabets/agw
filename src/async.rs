@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 
 use crate::{parse_header, Call, Header, Packet, HEADER_LEN};
 
+const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 type RuleIdent = u64;
 
 pub struct RuleHandle {
@@ -249,7 +251,11 @@ impl AGW {
         {
             return Err(Error::msg(format!("{e:?}")));
         }
-        let estab = rx.recv().await.ok_or(Error::msg("TODO"));
+
+        let estab = tokio::time::timeout(CONNECTION_TIMEOUT, rx.recv())
+            .await
+            .expect("connection timeout")
+            .ok_or(Error::msg("TODO"));
         drop(ident);
         let estab = estab?;
         match estab {
