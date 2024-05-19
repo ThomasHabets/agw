@@ -126,6 +126,7 @@ impl Default for Router {
     }
 }
 
+/// Packet in, packet out.
 struct Pipo {
     tx: mpsc::Sender<Packet>,
     rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,

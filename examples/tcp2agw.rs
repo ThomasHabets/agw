@@ -18,7 +18,7 @@ struct Opt {
     #[clap(short = 'c', default_value = "127.0.0.1:8010")]
     agw_addr: String,
 
-    #[clap(long, default_value = "0xF0")]
+    #[clap(long, default_value = "240")]
     pid: u8,
 
     #[clap()]
@@ -27,7 +27,7 @@ struct Opt {
     #[clap()]
     dst: String,
 
-    #[clap(short)]
+    #[clap(short, default_value = "0")]
     port: u8,
 }
 
