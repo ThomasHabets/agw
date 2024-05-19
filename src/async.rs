@@ -1,4 +1,5 @@
 use anyhow::{Error, Result};
+use log::debug;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -31,7 +32,7 @@ impl Drop for RuleHandle {
 
 #[derive(Clone)]
 pub enum RuleMatch {
-    Data(u8),
+    Data { port: u8, src: Call, dst: Call },
     ConnectionEstablished { port: u8, src: Call, dst: Call },
 }
 
@@ -45,16 +46,16 @@ pub struct Rule {
 impl RuleMatch {
     fn matches(&self, packet: &Packet) -> bool {
         match self {
-            RuleMatch::Data(port) => {
+            RuleMatch::Data { port, src, dst } => {
                 if let Packet::Data {
                     port: port2,
                     pid: _,
-                    src: _,
-                    dst: _,
+                    src: src2,
+                    dst: dst2,
                     data: _,
                 } = packet
                 {
-                    return port == port2;
+                    return port == port2 && src == src2 && dst == dst2;
                 }
             }
             RuleMatch::ConnectionEstablished { port, src, dst } => {
@@ -118,6 +119,9 @@ impl Router {
                 any = true;
             }
         }
+        if !any {
+            debug!("incoming packet had no match: {packet:?}");
+        }
         Ok(any)
     }
 }
@@ -131,7 +135,7 @@ impl Default for Router {
 /// Packet in, packet out.
 struct Pipo {
     tx: mpsc::Sender<Packet>,
-    rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
+    //rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
 }
 
 enum PIPOState {
@@ -140,26 +144,28 @@ enum PIPOState {
 }
 
 impl Pipo {
-    async fn new(con: TcpStream) -> Self {
-        let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
+    async fn new(con: TcpStream, router: Arc<Router>) -> Self {
+        //let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
         let (tx2, rx2) = mpsc::channel(10); // TODO: magic number.
         tokio::spawn(async move {
-            Self::run(con, tx1, rx2).await.expect("Pipo run() failed");
+            Self::run(con, router, rx2)
+                .await
+                .expect("Pipo run() failed");
         });
         Pipo {
             tx: tx2,
-            rx: tokio::sync::Mutex::new(rx1),
+            //rx: tokio::sync::Mutex::new(rx1),
         }
     }
     async fn send(&self, packet: Packet) -> Result<()> {
         self.tx.send(packet).await.map_err(|e| anyhow::anyhow!(e))
     }
-    async fn recv(&self) -> Option<Packet> {
+    /*    async fn recv(&self) -> Option<Packet> {
         self.rx.lock().await.recv().await
-    }
+    } */
     async fn run(
         mut con: TcpStream,
-        tx: mpsc::Sender<Packet>,
+        router: Arc<Router>,
         mut rx: mpsc::Receiver<Packet>,
     ) -> Result<()> {
         let mut state = PIPOState::AwaitHeader;
@@ -185,19 +191,21 @@ impl Pipo {
                     if header.data_len() > 0 {
                         let mut payload = vec![0; header.data_len() as usize];
                         tokio::select! {
-                                    ok = con.read_exact(&mut payload) => {
-                        ok?;
+                                        ok = con.read_exact(&mut payload) => {
+                            ok?;
                         let packet = Packet::parse(header, &payload)?;
-                        tx.send(packet).await?;
-                        state = PIPOState::AwaitHeader;
-                                    },
-                                    p = rx.recv() => match p {
-                        Some(p) => con.write_all(&p.serialize()).await?,
-                        // TODO: should we continue receiving
-                        // from con, still?
-                        None => return Ok(()),
-                                    },
-                                };
+                        debug!("Sending off packet {packet:?}");
+                            router.process(packet).await?;
+                        debug!("packet sent");
+                            state = PIPOState::AwaitHeader;
+                                        },
+                                        p = rx.recv() => match p {
+                            Some(p) => con.write_all(&p.serialize()).await?,
+                            // TODO: should we continue receiving
+                            // from con, still?
+                            None => return Ok(()),
+                                        },
+                                    };
                     }
                 }
             };
@@ -212,17 +220,21 @@ pub struct AGW {
 
 impl AGW {
     pub async fn new(addr: &str) -> Result<AGW> {
+        let router = Arc::new(Router::new());
+        let r2 = router.clone();
         Ok(Self {
-            con: Pipo::new(TcpStream::connect(addr).await?).await,
-            router: Arc::new(Router::new()),
+            con: Pipo::new(TcpStream::connect(addr).await?, r2).await,
+            router,
         })
     }
     pub async fn send(&self, data: Packet) -> Result<()> {
         self.con.send(data).await
     }
-    pub async fn recv(&self) -> Option<Packet> {
-        self.con.recv().await
+    /*
+        pub async fn recv(&self) -> Option<Packet> {
+            self.con.recv().await
     }
+        */
     pub async fn connect<'a>(
         &'a self,
         port: u8,
@@ -232,6 +244,8 @@ impl AGW {
         _via: &[Call],
     ) -> Result<Connection<'a>> {
         let (tx, mut rx) = mpsc::channel(1);
+
+        // Register rule for receiving connection established.
         let ident = self.router.add(
             RuleMatch::ConnectionEstablished {
                 port,
@@ -240,6 +254,19 @@ impl AGW {
             },
             tx,
         );
+
+        // Also register to receive data.
+        let (txd, rxd) = mpsc::channel(10); // TODO: magic number.
+        let rule_handle = self.router.add(
+            RuleMatch::Data {
+                port,
+                src: dst.clone(),
+                dst: src.clone(),
+            },
+            txd,
+        );
+
+        // Send connection establish.
         if let Err(e) = self
             .send(Packet::Connect {
                 port,
@@ -252,11 +279,13 @@ impl AGW {
             return Err(Error::msg(format!("{e:?}")));
         }
 
+        // Wait for connection established.
         let estab = tokio::time::timeout(CONNECTION_TIMEOUT, rx.recv())
             .await
             .expect("connection timeout")
             .ok_or(Error::msg("TODO"));
         drop(ident);
+
         let estab = estab?;
         match estab {
             Packet::ConnectionEstablished {
@@ -271,6 +300,8 @@ impl AGW {
                 src: src.clone(),
                 dst: dst.clone(),
                 agw: self,
+                _rule_handle: rule_handle,
+                rx: rxd,
                 disconnected: false,
             }),
             other => {
@@ -291,6 +322,8 @@ pub struct Connection<'a> {
     dst: Call,
     agw: &'a AGW,
     disconnected: bool,
+    _rule_handle: RuleHandle,
+    rx: mpsc::Receiver<Packet>,
 }
 
 impl<'a> Connection<'a> {
@@ -299,7 +332,7 @@ impl<'a> Connection<'a> {
         let _ = self.disconnected;
         let _ = self.src;
         let _ = self.dst;
-        todo!()
+        self.rx.recv().await.ok_or(Error::msg("recv failed"))
     }
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         let packet = Packet::Data {

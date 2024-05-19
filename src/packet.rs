@@ -2,6 +2,9 @@ use crate::{Call, Header};
 use anyhow::{Error, Result};
 use log::debug;
 
+const CMD_CONNECT: u8 = b'C';
+const CMD_DATA: u8 = b'D';
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Packet {
     VersionQuery,
@@ -212,9 +215,8 @@ impl Packet {
                 );
                 Packet::VersionReply(major, minor)
             }
-            b'C' => {
+            CMD_CONNECT => {
                 let s = String::from_utf8(data.to_vec())?;
-                debug!("TODO: do something with the connect message {s}");
                 let src = header
                     .src()
                     .clone()
@@ -223,7 +225,10 @@ impl Packet {
                     .dst()
                     .clone()
                     .ok_or(Error::msg("connect missing src"))?;
-                if s.starts_with("*** CONNECTED WITH") {
+                if s.starts_with("*** CONNECTED WITH")
+                    || s.starts_with("*** CONNECTED With Station ")
+                {
+                    debug!("Got ConnectionEstablished {s}");
                     Packet::ConnectionEstablished {
                         port: header.port(),
                         pid: header.pid(),
@@ -231,6 +236,7 @@ impl Packet {
                         dst: dst.clone(),
                     }
                 } else if s.starts_with("*** CONNECTED To Station") {
+                    debug!("Got IncomingConnect {s}");
                     Packet::IncomingConnect {
                         port: header.port(),
                         pid: header.pid(),
@@ -242,6 +248,19 @@ impl Packet {
                 }
             }
             //b'd' => Packet::Disconnect,
+            CMD_DATA => Packet::Data {
+                port: header.port(),
+                pid: header.pid(),
+                src: header
+                    .src()
+                    .clone()
+                    .ok_or(Error::msg("data with missing src"))?,
+                dst: header
+                    .dst()
+                    .clone()
+                    .ok_or(Error::msg("data with missing dst"))?,
+                data: data.to_vec(),
+            },
             _ => {
                 return Err(Error::msg(format!(
                     "unknown packet kind {}",

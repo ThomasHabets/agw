@@ -66,6 +66,10 @@ async fn main() -> Result<()> {
         .unwrap();
 
     let agw = AGW::new(&opt.agw_addr).await?;
+
+    let listener = TcpListener::bind(&opt.listen).await?;
+    let (stream, _) = listener.accept().await?;
+
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
     // agw.register_callsign(opt.port, opt.pid, &src)?;
@@ -74,10 +78,8 @@ async fn main() -> Result<()> {
         let _con2 = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
     }
     //let agw = Arc::new(Mutex::new(agw));
-    let listener = TcpListener::bind(&opt.listen).await?;
     //for stream in listener.incoming() {
     //let stream = stream?;
-    let (stream, _) = listener.accept().await?;
     //std::thread::spawn(move || {
     bidir(con, stream).await?;
     //});
