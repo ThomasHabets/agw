@@ -10,3 +10,6 @@ pub use v1::*;
 
 pub mod r#async;
 pub mod proxy;
+
+#[cfg(feature = "native")]
+pub mod native;
