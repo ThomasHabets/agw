@@ -4,14 +4,32 @@ use std::ffi::CString;
 use std::io::{Error, ErrorKind, Read, Write};
 
 mod native {
+    // TODO: this can easily be rewritten in Rust.
     #[link(name = "ax25", kind = "dylib")]
     extern "C" {
-        // This is the C function you want to call
         pub fn ax25_aton_entry(cp: *const libc::c_char, axp: *mut libc::c_uchar) -> libc::c_int;
     }
 }
 
 type BinaryCall = [u8; 7];
+fn empty_call() -> BinaryCall {
+    [0u8; 7]
+}
+
+pub fn parse_call(call: &str) -> Result<BinaryCall> {
+    let mut sax25_call = [0u8; 7];
+    let rc = unsafe {
+        native::ax25_aton_entry(
+            CString::new(call)?.as_ptr(),
+            &mut sax25_call as *mut libc::c_uchar,
+        )
+    };
+    if rc == -1 {
+        Err(anyhow::Error::msg("failed to parse call {call}"))
+    } else {
+        Ok(sax25_call)
+    }
+}
 
 struct FD {
     fd: i32,
@@ -45,13 +63,14 @@ pub struct NativeStream {
     fd: FD,
 }
 
+/// This is exactly the Linux libax25 C equivalent struct.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct full_sockaddr_ax25 {
     pub sax25_family: libc::sa_family_t,
-    pub sax25_call: [u8; 7],
+    pub sax25_call: BinaryCall,
     pub sax25_ndigis: libc::c_int,
-    pub sax25_digipeater: [[u8; 7]; 8], // max 8 digipeaters
+    pub sax25_digipeater: [BinaryCall; 8], // max 8 digipeaters
 }
 
 mod primitive {
@@ -62,24 +81,24 @@ mod primitive {
         fd.get().ok_or(std::io::Error::last_os_error())?;
         Ok(fd)
     }
-    pub fn make_sa(call: &str, digis: &[&str]) -> Result<full_sockaddr_ax25> {
-        let mut sax25_digipeater = [[0u8; 7]; 8];
+    pub fn make_sa(call: &BinaryCall, digis: &[BinaryCall]) -> Result<full_sockaddr_ax25> {
+        let mut sax25_digipeater = [empty_call(); 8];
         for (i, digi) in digis.iter().enumerate() {
             if i >= sax25_digipeater.len() {
                 // TODO: return error?
                 break;
             }
-            sax25_digipeater[i] = primitive::ax25_aton_entry(*digi)?;
+            sax25_digipeater[i] = *digi;
         }
         Ok(full_sockaddr_ax25 {
             sax25_family: libc::AF_AX25 as libc::sa_family_t,
-            sax25_call: ax25_aton_entry(call)?,
+            sax25_call: *call,
             sax25_ndigis: digis.len() as libc::c_int,
             sax25_digipeater,
         })
     }
 
-    pub fn bind(fd: &FD, mycall: &str, digis: &[&str]) -> Result<()> {
+    pub fn bind(fd: &FD, mycall: &BinaryCall, digis: &[BinaryCall]) -> Result<()> {
         let sa = make_sa(mycall, digis)?;
         let sa_ptr = &sa as *const _ as *const libc::sockaddr;
         let rc = unsafe {
@@ -95,21 +114,22 @@ mod primitive {
             Ok(())
         }
     }
-    pub fn ax25_aton_entry(call: &str) -> Result<BinaryCall> {
-        let mut sax25_call = [0u8; 7];
-        let rc = unsafe {
-            native::ax25_aton_entry(
-                CString::new(call)?.as_ptr(),
-                &mut sax25_call as *mut libc::c_uchar,
-            )
-        };
-        if rc == -1 {
-            Err(anyhow::Error::msg("failed to parse call {call}"))
-        } else {
-            Ok(sax25_call)
-        }
+    /*    pub fn ax25_aton_entry(call: &str) -> Result<BinaryCall> {
+            let mut sax25_call = [0u8; 7];
+            let rc = unsafe {
+                native::ax25_aton_entry(
+                    CString::new(call)?.as_ptr(),
+                    &mut sax25_call as *mut libc::c_uchar,
+                )
+            };
+            if rc == -1 {
+                Err(anyhow::Error::msg("failed to parse call {call}"))
+            } else {
+                Ok(sax25_call)
+            }
     }
-    pub fn connect(fd: &FD, call: &str, digis: &[&str]) -> Result<()> {
+        */
+    pub fn connect(fd: &FD, call: &BinaryCall, digis: &[BinaryCall]) -> Result<()> {
         let sa = make_sa(call, digis)?;
         let sa_ptr = &sa as *const _ as *const libc::sockaddr;
         if -1
@@ -152,9 +172,14 @@ mod primitive {
 }
 
 impl NativeStream {
-    pub fn connect(mycall: &str, radio: &str, call: &str, digis: &[&str]) -> Result<Self> {
+    pub fn connect(
+        mycall: &BinaryCall,
+        radio: &BinaryCall,
+        call: &BinaryCall,
+        digis: &[BinaryCall],
+    ) -> Result<Self> {
         let fd = primitive::socket()?;
-        primitive::bind(&fd, mycall, &[radio])?;
+        primitive::bind(&fd, mycall, &[*radio])?;
         primitive::connect(&fd, call, digis)?;
         Ok(Self { fd })
     }
