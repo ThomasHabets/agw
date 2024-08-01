@@ -1,12 +1,12 @@
 use anyhow::Result;
 use log::error;
-use std::io::Read;
 
 extern crate libc;
 
 pub struct PubKey {
     pubkey: Vec<u8>,
 }
+
 pub struct SecKey {
     seckey: Vec<u8>,
 }
@@ -16,6 +16,14 @@ impl PubKey {
         PubKey {
             pubkey: vec![0; unsafe { crypto_sign_publickeybytes() } as usize],
         }
+    }
+    pub fn load(fname: &std::path::Path) -> Result<PubKey> {
+        // TODO: don't OOM if we point to the wrong place.
+        let pubkey = std::fs::read(fname)?;
+        if pubkey.len() != unsafe { crypto_sign_publickeybytes() } as usize {
+            return Err(anyhow::Error::msg("public key file has wrong size"));
+        }
+        Ok(PubKey { pubkey })
     }
     fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
         self.pubkey.as_mut_ptr()
@@ -29,6 +37,14 @@ impl SecKey {
         SecKey {
             seckey: vec![0; unsafe { crypto_sign_secretkeybytes() } as usize],
         }
+    }
+    pub fn load(fname: &std::path::Path) -> Result<SecKey> {
+        // TODO: don't OOM if we point to the wrong place.
+        let seckey = std::fs::read(fname)?;
+        if seckey.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
+            return Err(anyhow::Error::msg("secret key file has wrong size"));
+        }
+        Ok(SecKey { seckey })
     }
     fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
         self.seckey.as_mut_ptr()
@@ -185,20 +201,10 @@ pub struct Wrapper {
     seckey: SecKey,
 }
 impl Wrapper {
-    pub fn from_files(pk: &str, sk: &str) -> Result<Self> {
-        let mut pkb = Vec::new();
-        let mut skb = Vec::new();
-        std::fs::File::open(pk)?.read_to_end(&mut pkb)?;
-        std::fs::File::open(sk)?.read_to_end(&mut skb)?;
-        if pkb.len() != unsafe { crypto_sign_publickeybytes() } as usize {
-            return Err(anyhow::Error::msg("public key file has wrong size"));
-        }
-        if skb.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
-            return Err(anyhow::Error::msg("secret key has wrong size"));
-        }
+    pub fn from_files(pk: &std::path::Path, sk: &std::path::Path) -> Result<Self> {
         Ok(Self {
-            pubkey: PubKey { pubkey: pkb },
-            seckey: SecKey { seckey: skb },
+            pubkey: PubKey::load(pk)?,
+            seckey: SecKey::load(sk)?,
         })
     }
 }

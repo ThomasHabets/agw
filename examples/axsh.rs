@@ -13,7 +13,10 @@ fn main2() -> Result<()> {
         &[],
     )
     .expect("connect()");
-    let wrapper = agw::crypto::Wrapper::from_files("test.ax25.pub", "test.ax25.priv")?;
+    let wrapper = agw::crypto::Wrapper::from_files(
+        std::path::Path::new("test.ax25.pub"),
+        std::path::Path::new("test.ax25.priv"),
+    )?;
     let mut stream = agw::wrap::Wrap::new(stream, wrapper);
 
     for line in std::io::stdin().lock().lines() {
