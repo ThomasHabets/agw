@@ -14,7 +14,7 @@ pub struct SecKey {
 impl PubKey {
     fn new() -> Self {
         PubKey {
-            pubkey: vec![0; unsafe { agw_crypto_sign_PUBLICKEYBYTES } as usize],
+            pubkey: vec![0; unsafe { crypto_sign_publickeybytes() } as usize],
         }
     }
     fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
@@ -27,7 +27,7 @@ impl PubKey {
 impl SecKey {
     fn new() -> Self {
         SecKey {
-            seckey: vec![0; unsafe { agw_crypto_sign_SECRETKEYBYTES } as usize],
+            seckey: vec![0; unsafe { crypto_sign_secretkeybytes() } as usize],
         }
     }
     fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
@@ -69,12 +69,9 @@ extern "C" {
         pubkey: *const libc::c_uchar,
     ) -> libc::c_int;
     fn crypto_sign_keypair(pubkey: *mut libc::c_uchar, sk: *mut libc::c_uchar) -> libc::c_int;
-}
-#[link(name = "defines", kind = "static")]
-extern "C" {
-    static agw_crypto_sign_PUBLICKEYBYTES: libc::c_ulonglong;
-    static agw_crypto_sign_SECRETKEYBYTES: libc::c_ulonglong;
-    static agw_crypto_sign_BYTES: libc::c_ulonglong;
+    fn crypto_sign_publickeybytes() -> libc::c_ulonglong;
+    fn crypto_sign_secretkeybytes() -> libc::c_ulonglong;
+    fn crypto_sign_bytes() -> libc::c_ulonglong;
 }
 
 fn init() {
@@ -85,7 +82,7 @@ fn init() {
 
 pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     init();
-    let mut sig = vec![0u8; msg.len() + unsafe { agw_crypto_sign_BYTES } as usize];
+    let mut sig = vec![0u8; msg.len() + unsafe { crypto_sign_bytes() } as usize];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
     let mut siglen: libc::c_ulonglong = sig.len().try_into()?;
@@ -107,7 +104,7 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
 
 pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     init();
-    let mut sig = vec![0u8; unsafe { agw_crypto_sign_BYTES } as usize];
+    let mut sig = vec![0u8; unsafe { crypto_sign_bytes() } as usize];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
     let mut siglen: libc::c_ulonglong = sig.len().try_into()?;
@@ -120,7 +117,7 @@ pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
             key.as_ptr(),
         )
     };
-    assert_eq!(siglen, unsafe { agw_crypto_sign_BYTES });
+    assert_eq!(siglen, unsafe { crypto_sign_bytes() });
     if rc == -1 {
         Err(anyhow::Error::msg("crypto_sign_detached() failed"))
     } else {
@@ -131,7 +128,7 @@ pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
 pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
     init();
     let siglen = sig.len();
-    let rightlen = unsafe { agw_crypto_sign_BYTES } as usize;
+    let rightlen = unsafe { crypto_sign_bytes() } as usize;
     if siglen < rightlen {
         error!("Signature length incorrect: expected {siglen} >= {rightlen}");
         return None;
@@ -157,7 +154,7 @@ pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
 pub fn verify_detached(sig: &[u8], msg: &[u8], pubkey: &PubKey) -> bool {
     init();
     let siglen = sig.len();
-    let rightlen = unsafe { agw_crypto_sign_BYTES } as usize;
+    let rightlen = unsafe { crypto_sign_bytes() } as usize;
     if siglen != rightlen {
         error!("Signature length incorrect: expected {rightlen} got {siglen}");
         return false;
@@ -193,10 +190,10 @@ impl Wrapper {
         let mut skb = Vec::new();
         std::fs::File::open(pk)?.read_to_end(&mut pkb)?;
         std::fs::File::open(sk)?.read_to_end(&mut skb)?;
-        if pkb.len() != unsafe { agw_crypto_sign_PUBLICKEYBYTES } as usize {
+        if pkb.len() != unsafe { crypto_sign_publickeybytes() } as usize {
             return Err(anyhow::Error::msg("public key file has wrong size"));
         }
-        if skb.len() != unsafe { agw_crypto_sign_SECRETKEYBYTES } as usize {
+        if skb.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
             return Err(anyhow::Error::msg("secret key has wrong size"));
         }
         Ok(Self {
