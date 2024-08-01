@@ -1,6 +1,6 @@
 fn main() {
     cc::Build::new()
-        .file("src/native/defines.c")
+        .file("src/crypto/defines.c")
         .compile("defines");
     println!(
         "cargo:rustc-link-search=native={}",

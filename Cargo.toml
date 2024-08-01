@@ -21,6 +21,7 @@ cc = "1.1.7"
 
 [features]
 native=["dep:libc"]
+crypto=["dep:libc"]
 
 [dev-dependencies]
 libc = "0.2.155"

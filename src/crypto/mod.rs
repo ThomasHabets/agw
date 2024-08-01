@@ -1,5 +1,6 @@
 use anyhow::Result;
 use log::error;
+use std::io::Read;
 
 extern crate libc;
 
@@ -40,12 +41,26 @@ impl SecKey {
 #[link(name = "sodium", kind = "dylib")]
 extern "C" {
     fn sodium_init();
+    fn crypto_sign(
+        sm: *mut libc::c_uchar,
+        smlen: *mut libc::c_ulonglong,
+        msg: *const libc::c_uchar,
+        msglen: libc::c_ulonglong,
+        sk: *const libc::c_uchar,
+    ) -> libc::c_int;
     fn crypto_sign_detached(
         sig: *mut libc::c_uchar,
         siglen: *mut libc::c_ulonglong,
         msg: *const libc::c_uchar,
         msglen: libc::c_ulonglong,
         sk: *const libc::c_uchar,
+    ) -> libc::c_int;
+    fn crypto_sign_open(
+        msg: *mut libc::c_uchar,
+        msglen: *mut libc::c_ulonglong,
+        sm: *const libc::c_uchar,
+        smlen: libc::c_ulonglong,
+        pubkey: *const libc::c_uchar,
     ) -> libc::c_int;
     fn crypto_sign_verify_detached(
         sig: *const libc::c_uchar,
@@ -70,6 +85,29 @@ fn init() {
 
 pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     init();
+    let mut sig = vec![0u8; msg.len() + unsafe { agw_crypto_sign_BYTES } as usize];
+    // siglen is actually a strict out parameter. But in case that changes,
+    // let's set it.
+    let mut siglen: libc::c_ulonglong = sig.len().try_into()?;
+    let rc = unsafe {
+        crypto_sign(
+            sig.as_mut_ptr(),
+            &mut siglen as *mut _,
+            msg.as_ptr(),
+            msg.len() as libc::c_ulonglong,
+            key.as_ptr(),
+        )
+    };
+    assert_eq!(siglen, unsafe { agw_crypto_sign_BYTES });
+    if rc == -1 {
+        Err(anyhow::Error::msg("crypto_sign_detached() failed"))
+    } else {
+        Ok(sig[..(siglen as usize)].to_vec())
+    }
+}
+
+pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
+    init();
     let mut sig = vec![0u8; unsafe { agw_crypto_sign_BYTES } as usize];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
@@ -91,7 +129,33 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     }
 }
 
-pub fn verify(sig: &[u8], msg: &[u8], pubkey: &PubKey) -> bool {
+pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
+    init();
+    let siglen = sig.len();
+    let rightlen = unsafe { agw_crypto_sign_BYTES } as usize;
+    if siglen < rightlen {
+        error!("Signature length incorrect: expected {siglen} >= {rightlen}");
+        return None;
+    }
+    let mut msg = vec![0u8; siglen - rightlen];
+    let mut msglen: libc::c_ulonglong = 0;
+    let rc = unsafe {
+        crypto_sign_open(
+            msg.as_mut_ptr(),
+            &mut msglen as *mut libc::c_ulonglong,
+            sig.as_ptr(),
+            siglen as libc::c_ulonglong,
+            pubkey.as_ptr(),
+        )
+    };
+    if rc == 0 {
+        Some(msg)
+    } else {
+        None
+    }
+}
+
+pub fn verify_detached(sig: &[u8], msg: &[u8], pubkey: &PubKey) -> bool {
     init();
     let siglen = sig.len();
     let rightlen = unsafe { agw_crypto_sign_BYTES } as usize;
@@ -128,19 +192,19 @@ mod tests {
     fn test_sign() -> Result<()> {
         let msg = vec![1, 2, 3, 4, 5];
         let (pk, sk) = keygen()?;
-        let sig = sign(&msg, &sk)?;
+        let sig = sign_detached(&msg, &sk)?;
         println!("{sig:?}");
-        assert!(verify(&sig, &msg, &pk));
+        assert!(verify_detached(&sig, &msg, &pk));
         Ok(())
     }
     #[test]
     fn test_sign_fail() -> Result<()> {
         let msg = vec![1, 2, 3, 4, 5];
         let (pk, sk) = keygen()?;
-        let mut sig = sign(&msg, &sk)?;
+        let mut sig = sign_detached(&msg, &sk)?;
         sig[3] ^= 8;
         println!("{sig:?}");
-        assert!(!verify(&sig, &msg, &pk));
+        assert!(!verify_detached(&sig, &msg, &pk));
         Ok(())
     }
 }
