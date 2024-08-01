@@ -184,6 +184,37 @@ pub fn keygen() -> Result<(PubKey, SecKey)> {
     Ok((pk, sk))
 }
 
+pub struct Wrapper {
+    pubkey: PubKey,
+    seckey: SecKey,
+}
+impl Wrapper {
+    pub fn from_files(pk: &str, sk: &str) -> Result<Self> {
+        let mut pkb = Vec::new();
+        let mut skb = Vec::new();
+        std::fs::File::open(pk)?.read_to_end(&mut pkb)?;
+        std::fs::File::open(sk)?.read_to_end(&mut skb)?;
+        if pkb.len() != unsafe { agw_crypto_sign_PUBLICKEYBYTES } as usize {
+            return Err(anyhow::Error::msg("public key file has wrong size"));
+        }
+        if skb.len() != unsafe { agw_crypto_sign_SECRETKEYBYTES } as usize {
+            return Err(anyhow::Error::msg("secret key has wrong size"));
+        }
+        Ok(Self {
+            pubkey: PubKey { pubkey: pkb },
+            seckey: SecKey { seckey: skb },
+        })
+    }
+}
+impl crate::wrap::Wrapper for Wrapper {
+    fn wrap(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        sign(msg, &self.seckey)
+    }
+    fn unwrap(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        open(msg, &self.pubkey).ok_or(anyhow::Error::msg("unwrap failed"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
