@@ -19,7 +19,9 @@ impl PubKey {
     }
     pub fn load(fname: &std::path::Path) -> Result<PubKey> {
         // TODO: don't OOM if we point to the wrong place.
-        let pubkey = std::fs::read(fname)?;
+        let pubkey = std::fs::read(fname).map_err(|e| {
+            anyhow::Error::msg(format!("opening public key {}: {e}", fname.display()))
+        })?;
         if pubkey.len() != unsafe { crypto_sign_publickeybytes() } as usize {
             return Err(anyhow::Error::msg("public key file has wrong size"));
         }
@@ -40,7 +42,9 @@ impl SecKey {
     }
     pub fn load(fname: &std::path::Path) -> Result<SecKey> {
         // TODO: don't OOM if we point to the wrong place.
-        let seckey = std::fs::read(fname)?;
+        let seckey = std::fs::read(fname).map_err(|e| {
+            anyhow::Error::msg(format!("opening secret key {}: {e}", fname.display()))
+        })?;
         if seckey.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
             return Err(anyhow::Error::msg("secret key file has wrong size"));
         }

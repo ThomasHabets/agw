@@ -6,6 +6,10 @@ fn main2() -> Result<()> {
     use std::io::BufRead;
     use std::io::{Read, Write};
     // use agw::wrap::Wrapper;
+    let wrapper = agw::crypto::Wrapper::from_files(
+        std::path::Path::new("test.ax25.pub"),
+        std::path::Path::new("test.ax25.priv"),
+    )?;
     let stream: &mut dyn Stream = &mut NativeStream::connect(
         &parse_call("M0THC-1")?, // Mycall.
         &parse_call("M0THC-1")?, // Radio call.
@@ -13,10 +17,6 @@ fn main2() -> Result<()> {
         &[],
     )
     .expect("connect()");
-    let wrapper = agw::crypto::Wrapper::from_files(
-        std::path::Path::new("test.ax25.pub"),
-        std::path::Path::new("test.ax25.priv"),
-    )?;
     let mut stream = agw::wrap::Wrap::new(stream, wrapper);
 
     for line in std::io::stdin().lock().lines() {
