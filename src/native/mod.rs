@@ -2,6 +2,8 @@ use anyhow::Result;
 use libc::c_void;
 use std::io::{Error, ErrorKind, Read, Write};
 
+pub mod crypto;
+
 type BinaryCall = [u8; 7];
 fn empty_call() -> BinaryCall {
     [0u8; 7]
