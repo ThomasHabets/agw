@@ -33,7 +33,7 @@ pub fn parse_call(call: &str) -> Result<BinaryCall> {
             .expect("internal error: character can't be uppercased");
         bin[i] = (ch as u8) << 1;
     }
-    bin[6] = ((ssid + b'0') << 1) & 0x1E;
+    bin[6] = ssid << 1;
     Ok(bin)
 }
 
