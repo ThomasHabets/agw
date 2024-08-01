@@ -11,12 +11,12 @@ pub struct SecKey {
 }
 
 impl PubKey {
-    pub fn new() -> Self {
+    fn new() -> Self {
         PubKey {
             pubkey: vec![0; unsafe { agw_crypto_sign_PUBLICKEYBYTES } as usize],
         }
     }
-    pub fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
+    fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
         self.pubkey.as_mut_ptr()
     }
     fn as_ptr(&self) -> *const libc::c_uchar {
@@ -24,12 +24,12 @@ impl PubKey {
     }
 }
 impl SecKey {
-    pub fn new() -> Self {
+    fn new() -> Self {
         SecKey {
             seckey: vec![0; unsafe { agw_crypto_sign_SECRETKEYBYTES } as usize],
         }
     }
-    pub fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
+    fn as_mut_ptr(&mut self) -> *mut libc::c_uchar {
         self.seckey.as_mut_ptr()
     }
     fn as_ptr(&self) -> *const libc::c_uchar {
