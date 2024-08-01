@@ -98,7 +98,6 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
             key.as_ptr(),
         )
     };
-    assert_eq!(siglen, unsafe { agw_crypto_sign_BYTES });
     if rc == -1 {
         Err(anyhow::Error::msg("crypto_sign_detached() failed"))
     } else {
@@ -220,7 +219,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sign() -> Result<()> {
+    fn test_sign_detached() -> Result<()> {
         let msg = vec![1, 2, 3, 4, 5];
         let (pk, sk) = keygen()?;
         let sig = sign_detached(&msg, &sk)?;
@@ -229,13 +228,31 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn test_sign_fail() -> Result<()> {
+    fn test_sign_fail_detached() -> Result<()> {
         let msg = vec![1, 2, 3, 4, 5];
         let (pk, sk) = keygen()?;
         let mut sig = sign_detached(&msg, &sk)?;
         sig[3] ^= 8;
         println!("{sig:?}");
         assert!(!verify_detached(&sig, &msg, &pk));
+        Ok(())
+    }
+    #[test]
+    fn test_sign() -> Result<()> {
+        let msg = vec![1, 2, 3, 4, 5];
+        let (pk, sk) = keygen()?;
+        let signed = sign(&msg, &sk)?;
+        let opened = open(&signed, &pk).unwrap();
+        assert_eq!(opened, msg);
+        Ok(())
+    }
+    #[test]
+    fn test_sign_fail() -> Result<()> {
+        let msg = vec![1, 2, 3, 4, 5];
+        let (pk, sk) = keygen()?;
+        let mut signed = sign_detached(&msg, &sk)?;
+        signed[3] ^= 8;
+        assert_eq!(None, open(&signed, &pk));
         Ok(())
     }
 }
