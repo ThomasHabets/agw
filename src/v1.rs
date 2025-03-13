@@ -169,7 +169,7 @@ impl<'a> Connection<'a> {
         pid: u8,
         src: Call,
         dst: Call,
-    ) -> Connection {
+    ) -> Self {
         Connection {
             port,
             connect_string,
