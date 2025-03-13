@@ -326,7 +326,7 @@ pub struct Connection<'a> {
     rx: mpsc::Receiver<Packet>,
 }
 
-impl<'a> Connection<'a> {
+impl Connection<'_> {
     pub async fn recv(&mut self) -> Result<Packet> {
         let _ = self.connect_string;
         let _ = self.disconnected;

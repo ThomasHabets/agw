@@ -234,7 +234,7 @@ impl<'a> Connection<'a> {
     }
 }
 
-impl<'a> Drop for Connection<'a> {
+impl Drop for Connection<'_> {
     fn drop(&mut self) {
         if let Err(e) = self.disconnect() {
             warn!("drop-disconnection errored with {:?}", e);
@@ -461,9 +461,7 @@ impl AGW {
         let connect_string;
         loop {
             let (head, r) = self.rx.recv()?;
-            if head.src().as_ref().map_or(true, |x| x != dst)
-                || head.dst().as_ref().map_or(true, |x| x != src)
-            {
+            if (head.src().as_ref() != Some(dst)) || (head.dst().as_ref() != Some(src)) {
                 //eprintln!("Got packet not for us");
                 continue;
             }
@@ -515,9 +513,7 @@ impl AGW {
         // First check the existing queue.
         for frame in self.rxqueue.iter().enumerate() {
             let (n, (head, payload)) = &frame;
-            if head.src().as_ref().map_or(true, |x| x != remote)
-                || head.dst().as_ref().map_or(true, |x| x != me)
-            {
+            if (head.src().as_ref() != Some(remote)) || (head.dst().as_ref() != Some(me)) {
                 continue;
             }
             match payload {

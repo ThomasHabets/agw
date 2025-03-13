@@ -27,7 +27,7 @@ impl<T: Read + Write, W: Wrapper> Read for Wrap<T, W> {
         let msg = self
             .wrapper
             .wrap(buf2)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
+            .map_err(|e| std::io::Error::other(format!("{}", e)))?;
         let msglen = msg.len();
         buf.copy_from_slice(&msg);
         Ok(msglen)
