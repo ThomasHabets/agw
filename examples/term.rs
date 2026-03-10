@@ -12,7 +12,7 @@ use cursive::views::{
 use log::{debug, error};
 use serde::Serialize;
 
-use agw::Call;
+use agw::{Call, Pid, Port};
 
 fn run_ui(
     up_tx: mpsc::Sender<String>,
@@ -264,8 +264,8 @@ fn main() -> Result<()> {
     let mut agw = agw::AGW::new(&opt.agw_addr)?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
-    agw.register_callsign(opt.port, opt.pid, src)?;
-    let mut con = agw.connect(opt.port, opt.pid, src, dst, &[])?;
+    agw.register_callsign(Port(opt.port), Pid(opt.pid), src)?;
+    let mut con = agw.connect(Port(opt.port), Pid(opt.pid), src, dst, &[])?;
     let initial_status: String = con.connect_string().into();
     status_tx
         .send(initial_status)

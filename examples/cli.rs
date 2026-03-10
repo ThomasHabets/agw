@@ -1,8 +1,16 @@
-use agw::Call;
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use std::str::FromStr;
+
+use agw::{Call, Port};
+
+fn parse_port(s: &str) -> Result<Port, String> {
+    let v: u8 = s
+        .parse()
+        .map_err(|_| format!("expected an integer in 0..=255, got {s:?}"))?;
+    Ok(Port(v))
+}
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -11,11 +19,10 @@ enum Command {
         dst: String,
     },
     Version {},
-    PortInfo {
-        port: u8,
-    },
+    PortInfo,
     PortCap {
-        port: u8,
+        #[arg(value_parser = parse_port)]
+        port: Port,
     },
     Unproto {
         src: String,
@@ -31,9 +38,6 @@ struct Cli {
 
     #[clap(short, default_value = "0")]
     verbose: usize,
-
-    #[clap(short, default_value = "0")]
-    port: u8,
 
     #[clap(short = 'c', default_value = "127.0.0.1:8010")]
     agw_addr: String,
@@ -57,12 +61,13 @@ fn main() -> Result<()> {
             let (a, b) = agw.version()?;
             eprintln!("AGW server version: {a}.{b}");
         }
-        Command::PortInfo { port } => eprintln!("{}", agw.port_info(port)?),
+        Command::PortInfo => eprintln!("{}", agw.port_info()?),
         Command::PortCap { port } => eprintln!("{}", agw.port_cap(port)?),
         Command::Unproto { src, dst, msg } => {
-            let pid = 0xF0; // TODO: make a flag.
+            let pid = agw::Pid(0xF0); // TODO: make a flag.
+            let port = agw::Port(0); // TODO
             agw.unproto(
-                opt.port,
+                port,
                 pid,
                 &Call::from_str(&src)?,
                 &Call::from_str(&dst)?,
@@ -70,10 +75,11 @@ fn main() -> Result<()> {
             )?;
         }
         Command::Connect { src, dst } => {
-            let pid = 0xF0; // TODO: make a flag.
+            let port = agw::Port(0); // TODO
+            let pid = agw::Pid(0xF0); // TODO: make a flag.
             let src = &Call::from_str(&src)?;
-            agw.register_callsign(opt.port, pid, src)?;
-            let mut con = agw.connect(opt.port, pid, src, &Call::from_str(&dst)?, &[])?;
+            agw.register_callsign(port, pid, src)?;
+            let mut con = agw.connect(port, pid, src, &Call::from_str(&dst)?, &[])?;
             con.write(b"echo hello world\n")?;
             eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
             std::thread::sleep(std::time::Duration::from_millis(3000));

@@ -1,9 +1,9 @@
-use crate::Call;
+use crate::{Call, Pid, Port};
 
 #[derive(Clone, Debug)]
 pub struct Header {
-    port: u8,
-    pid: u8,
+    port: Port,
+    pid: Pid,
     data_kind: u8,
     data_len: u32,
     src: Option<Call>,
@@ -11,10 +11,10 @@ pub struct Header {
 }
 pub const HEADER_LEN: usize = 36;
 impl Header {
-    pub fn port(&self) -> u8 {
+    pub fn port(&self) -> Port {
         self.port
     }
-    pub fn pid(&self) -> u8 {
+    pub fn pid(&self) -> Pid {
         self.pid
     }
     pub fn data_kind(&self) -> u8 {
@@ -31,9 +31,9 @@ impl Header {
     }
 
     pub fn new(
-        port: u8,
+        port: Port,
         data_kind: u8,
-        pid: u8,
+        pid: Pid,
         src: Option<Call>,
         dst: Option<Call>,
         data_len: u32,
@@ -50,9 +50,9 @@ impl Header {
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut v = vec![0; HEADER_LEN];
-        v[0] = self.port;
+        v[0] = self.port.0;
         v[4] = self.data_kind;
-        v[6] = self.pid;
+        v[6] = self.pid.0;
 
         if let Some(src) = &self.src {
             v.splice(8..18, src.as_bytes().iter().cloned());

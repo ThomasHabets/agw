@@ -4,7 +4,7 @@ mod header;
 mod packet;
 pub use call::Call;
 pub use header::{Header, HEADER_LEN};
-pub use packet::Packet;
+pub use packet::{Packet, Pid, Port};
 
 #[cfg(feature = "crypto")]
 pub mod crypto;

@@ -1,5 +1,5 @@
 use crate::HEADER_LEN;
-use crate::{Call, Header, Packet};
+use crate::{Call, Header, Packet, Pid, Port};
 use anyhow::{Error, Result};
 use log::{debug, trace, warn};
 use std::collections::LinkedList;
@@ -120,8 +120,8 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
 ///
 /// See examples/term.rs for example use.
 pub struct MakeWriter {
-    port: u8,
-    pid: u8,
+    port: Port,
+    pid: Pid,
     src: Call,
     dst: Call,
 }
@@ -152,9 +152,9 @@ impl MakeWriter {
 ///
 /// Created from an AGW object, using `.connect()`.
 pub struct Connection<'a> {
-    port: u8,
+    port: Port,
     connect_string: String,
-    pid: u8,
+    pid: Pid,
     src: Call,
     dst: Call,
     agw: &'a mut AGW,
@@ -164,9 +164,9 @@ pub struct Connection<'a> {
 impl<'a> Connection<'a> {
     fn new(
         agw: &'a mut AGW,
-        port: u8,
+        port: Port,
         connect_string: String,
-        pid: u8,
+        pid: Pid,
         src: Call,
         dst: Call,
     ) -> Self {
@@ -248,9 +248,9 @@ pub fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
     let dst = Call::from_bytes(&header[18..28])?;
     let dst = if dst.is_empty() { None } else { Some(dst) };
     Ok(Header::new(
-        header[0],
+        Port(header[0]),
         header[4],
-        header[6],
+        Pid(header[6]),
         src,
         dst,
         u32::from_le_bytes(
@@ -368,8 +368,8 @@ impl AGW {
     }
 
     /// Get some port info for the AGW endpoint.
-    pub fn port_info(&mut self, port: u8) -> Result<String> {
-        self.send(&Packet::PortInfo(port).serialize())?;
+    pub fn port_info(&mut self) -> Result<String> {
+        self.send(&Packet::PortInfoQuery.serialize())?;
         loop {
             let (h, r) = self.rx.recv()?;
             match r {
@@ -380,8 +380,8 @@ impl AGW {
     }
 
     /// Get port capabilities of the AGW "port".
-    pub fn port_cap(&mut self, port: u8) -> Result<String> {
-        self.send(&Packet::PortCap(port).serialize())?;
+    pub fn port_cap(&mut self, port: Port) -> Result<String> {
+        self.send(&Packet::PortCapQuery(port).serialize())?;
         loop {
             let (h, r) = self.rx.recv()?;
             match r {
@@ -394,8 +394,8 @@ impl AGW {
     /// Send UI packet.
     pub fn unproto(
         &mut self,
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: &Call,
         dst: &Call,
         data: &[u8],
@@ -420,7 +420,7 @@ impl AGW {
     ///
     /// Presumably needed for incoming connection, but incoming
     /// connections are not tested yet.
-    pub fn register_callsign(&mut self, port: u8, pid: u8, src: &Call) -> Result<()> {
+    pub fn register_callsign(&mut self, port: Port, pid: Pid, src: &Call) -> Result<()> {
         debug!("Registering callsign");
         self.send(&Packet::RegisterCallsign(port, pid, src.clone()).serialize())?;
         Ok(())
@@ -429,8 +429,8 @@ impl AGW {
     /// Create a new connection.
     pub fn connect<'a>(
         &'a mut self,
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: &Call,
         dst: &Call,
         via: &[Call],
@@ -486,8 +486,8 @@ impl AGW {
 
     fn write_connected(
         &mut self,
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: &Call,
         dst: &Call,
         data: &[u8],

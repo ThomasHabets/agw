@@ -5,54 +5,70 @@ use log::debug;
 const CMD_CONNECT: u8 = b'C';
 const CMD_DATA: u8 = b'D';
 
+/// Port number.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Port(pub u8);
+
+/// PID number.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Pid(pub u8);
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Packet {
+    /// Application: Version query.
     VersionQuery,
-    VersionReply(u16, u16),
-    PortCap(u8),
-    PortInfo(u8),
-    RegisterCallsign(u8, u8, Call),
+
+    /// AGWPE: Version reply.
+    VersionReply {
+        major: u16,
+        minor: u16,
+    },
+
+    /// Application: Port capability query.
+    PortCapQuery(Port),
+    PortInfoQuery,
+    RegisterCallsign(Port, Pid, Call),
     Connect {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
     },
     ConnectVia {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
         via: Vec<Call>,
     },
     IncomingConnect {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
     },
     ConnectionEstablished {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
     },
     Disconnect {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
     },
     Unproto {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
         data: Vec<u8>,
     },
     Data {
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: Call,
         dst: Call,
         data: Vec<u8>,
@@ -69,19 +85,23 @@ pub enum Packet {
 impl Packet {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
-            Packet::VersionQuery => Header::new(0, b'R', 0, None, None, 0).serialize(),
-            Packet::VersionReply(maj, min) => {
+            Packet::VersionQuery => Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
+            Packet::VersionReply { major, minor } => {
                 let data = vec![
-                    *maj as u8,
-                    (*maj >> 8) as u8,
+                    *major as u8,
+                    (*major >> 8) as u8,
                     0,
                     0,
-                    *min as u8,
-                    (*min >> 8) as u8,
+                    *minor as u8,
+                    (*minor >> 8) as u8,
                     0,
                     0,
                 ];
-                [Header::new(0, b'R', 0, None, None, 0).serialize(), data].concat()
+                [
+                    Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
+                    data,
+                ]
+                .concat()
             }
             Packet::Connect {
                 port,
@@ -189,8 +209,10 @@ impl Packet {
                 data.to_vec(),
             ]
             .concat(),
-            Packet::PortInfo(port) => Header::new(*port, b'G', 0, None, None, 0).serialize(),
-            Packet::PortCap(port) => Header::new(*port, b'g', 0, None, None, 0).serialize(),
+            Packet::PortInfoQuery => Header::new(Port(0), b'G', Pid(0), None, None, 0).serialize(),
+            Packet::PortCapQuery(port) => {
+                Header::new(*port, b'g', Pid(0), None, None, 0).serialize()
+            }
         }
     }
     pub fn parse(header: &Header, data: &[u8]) -> Result<Packet> {
@@ -213,7 +235,7 @@ impl Packet {
                         .try_into()
                         .expect("can't happen: two bytes can't be made into u16?"),
                 );
-                Packet::VersionReply(major, minor)
+                Packet::VersionReply { major, minor }
             }
             CMD_CONNECT => {
                 let s = String::from_utf8(data.to_vec())?;

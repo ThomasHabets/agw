@@ -1,5 +1,6 @@
 use agw::r#async::{Connection, AGW};
-use agw::{Call, Packet};
+use agw::{Call, Packet, Pid, Port};
+
 use anyhow::Result;
 use clap::Parser;
 use log::info;
@@ -73,9 +74,13 @@ async fn main() -> Result<()> {
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
     // agw.register_callsign(opt.port, opt.pid, &src)?;
-    let con = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
+    let con = agw
+        .connect(Port(opt.port), Pid(opt.pid), src, dst, &[])
+        .await?;
     if false {
-        let _con2 = agw.connect(opt.port, opt.pid, src, dst, &[]).await?;
+        let _con2 = agw
+            .connect(Port(opt.port), Pid(opt.pid), src, dst, &[])
+            .await?;
     }
     //let agw = Arc::new(Mutex::new(agw));
     //for stream in listener.incoming() {

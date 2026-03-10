@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::{parse_header, Call, Header, Packet, HEADER_LEN};
+use crate::{parse_header, Call, Header, Packet, Pid, Port, HEADER_LEN};
 
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -32,8 +32,8 @@ impl Drop for RuleHandle {
 
 #[derive(Clone)]
 pub enum RuleMatch {
-    Data { port: u8, src: Call, dst: Call },
-    ConnectionEstablished { port: u8, src: Call, dst: Call },
+    Data { port: Port, src: Call, dst: Call },
+    ConnectionEstablished { port: Port, src: Call, dst: Call },
 }
 
 #[derive(Clone)]
@@ -237,8 +237,8 @@ impl AGW {
         */
     pub async fn connect<'a>(
         &'a self,
-        port: u8,
-        pid: u8,
+        port: Port,
+        pid: Pid,
         src: &Call,
         dst: &Call,
         _via: &[Call],
@@ -316,8 +316,8 @@ impl AGW {
 /// Created from an AGW object, using `.connect()`.
 pub struct Connection<'a> {
     connect_string: String,
-    port: u8,
-    pid: u8,
+    port: Port,
+    pid: Pid,
     src: Call,
     dst: Call,
     agw: &'a AGW,
