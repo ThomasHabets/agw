@@ -1,5 +1,6 @@
-use anyhow::Result;
 use log::error;
+
+use crate::{Error, Result};
 
 extern crate libc;
 
@@ -19,11 +20,10 @@ impl PubKey {
     }
     pub fn load(fname: &std::path::Path) -> Result<PubKey> {
         // TODO: don't OOM if we point to the wrong place.
-        let pubkey = std::fs::read(fname).map_err(|e| {
-            anyhow::Error::msg(format!("opening public key {}: {e}", fname.display()))
-        })?;
+        let pubkey = std::fs::read(fname)
+            .map_err(|e| Error::msg(format!("opening public key {}: {e}", fname.display())))?;
         if pubkey.len() != unsafe { crypto_sign_publickeybytes() } as usize {
-            return Err(anyhow::Error::msg("public key file has wrong size"));
+            return Err(Error::msg("public key file has wrong size"));
         }
         Ok(PubKey { pubkey })
     }
@@ -42,11 +42,10 @@ impl SecKey {
     }
     pub fn load(fname: &std::path::Path) -> Result<SecKey> {
         // TODO: don't OOM if we point to the wrong place.
-        let seckey = std::fs::read(fname).map_err(|e| {
-            anyhow::Error::msg(format!("opening secret key {}: {e}", fname.display()))
-        })?;
+        let seckey = std::fs::read(fname)
+            .map_err(|e| Error::msg(format!("opening secret key {}: {e}", fname.display())))?;
         if seckey.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
-            return Err(anyhow::Error::msg("secret key file has wrong size"));
+            return Err(Error::msg("secret key file has wrong size"));
         }
         Ok(SecKey { seckey })
     }
@@ -105,7 +104,7 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     let mut sig = vec![0u8; msg.len() + unsafe { crypto_sign_bytes() } as usize];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
-    let mut siglen: libc::c_ulonglong = sig.len().try_into()?;
+    let mut siglen: libc::c_ulonglong = sig.len().try_into().map_err(Error::other)?;
     let rc = unsafe {
         crypto_sign(
             sig.as_mut_ptr(),
@@ -116,7 +115,7 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
         )
     };
     if rc == -1 {
-        Err(anyhow::Error::msg("crypto_sign_detached() failed"))
+        Err(Error::msg("crypto_sign_detached() failed"))
     } else {
         Ok(sig[..(siglen as usize)].to_vec())
     }
@@ -127,7 +126,7 @@ pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     let mut sig = vec![0u8; unsafe { crypto_sign_bytes() } as usize];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
-    let mut siglen: libc::c_ulonglong = sig.len().try_into()?;
+    let mut siglen: libc::c_ulonglong = sig.len().try_into().map_err(Error::other)?;
     let rc = unsafe {
         crypto_sign_detached(
             sig.as_mut_ptr(),
@@ -139,7 +138,7 @@ pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     };
     assert_eq!(siglen, unsafe { crypto_sign_bytes() });
     if rc == -1 {
-        Err(anyhow::Error::msg("crypto_sign_detached() failed"))
+        Err(Error::msg("crypto_sign_detached() failed"))
     } else {
         Ok(sig[..(siglen as usize)].to_vec())
     }
@@ -217,7 +216,7 @@ impl crate::wrap::Wrapper for Wrapper {
         sign(msg, &self.seckey)
     }
     fn unwrap(&self, msg: &[u8]) -> Result<Vec<u8>> {
-        open(msg, &self.pubkey).ok_or(anyhow::Error::msg("unwrap failed"))
+        open(msg, &self.pubkey).ok_or(Error::msg("unwrap failed"))
     }
 }
 

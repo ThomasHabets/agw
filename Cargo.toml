@@ -10,7 +10,6 @@ description = "AGW protocol implementation"
 keywords = ["radio"]
 
 [dependencies]
-anyhow = "1.0.81"
 crossbeam-channel = "0.5.12"
 log = "0.4.21"
 tokio = { version = "1.37.0", features = ["full"] }
@@ -37,6 +36,7 @@ chrono = { version = "0.4.37", features = ["serde"] }
 tokio-rustls = "0.26.4"
 tokio = { version = "1.37.0", features = ["full"] }
 rustls-pemfile = "2.1.2"
+anyhow = "1.0.102"
 
 [lib]
 name = "agw"

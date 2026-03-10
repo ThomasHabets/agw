@@ -1,11 +1,11 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use anyhow::Result;
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use log::{debug, trace};
 
 use crate::Packet;
+use crate::{Error, Result};
 
 /// AGW proxy stream.
 pub struct Proxy {
@@ -95,7 +95,7 @@ impl ConnectionV2 {
             //tx.send((header, reply))?;
             let packet = Packet::parse(&header, &payload)?;
             trace!("ConnectionV2 rx_loop: {packet:?}");
-            tx.send(packet)?;
+            tx.send(packet).map_err(Error::other)?;
         }
     }
     fn new(rstream: TcpStream) -> Result<Self> {
@@ -118,7 +118,7 @@ impl ConnectionV2 {
             tx: txtx,
         })
     }
-    fn send(&self, packet: Packet) -> Result<(), crossbeam_channel::SendError<Packet>> {
-        self.tx.send(packet)
+    fn send(&self, packet: Packet) -> Result<()> {
+        self.tx.send(packet).map_err(Error::other)
     }
 }

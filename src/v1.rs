@@ -1,11 +1,12 @@
-use crate::HEADER_LEN;
-use crate::{Call, Header, Packet, Pid, Port};
-use anyhow::{Error, Result};
 use log::{debug, trace, warn};
 use std::collections::LinkedList;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
+
+use crate::HEADER_LEN;
+use crate::{Call, Header, Packet, Pid, Port};
+use crate::{Error, Result};
 
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
@@ -112,16 +113,20 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             Reply::Version(major, minor)
         }
         b'X' => Reply::CallsignRegistration(data[0] == 1),
-        b'C' => Reply::Connected(std::str::from_utf8(data)?.to_string()),
+        b'C' => Reply::Connected(std::str::from_utf8(data).map_err(Error::other)?.to_string()),
         b'D' => Reply::ConnectedData(data.to_vec()),
         b'd' => Reply::Disconnect,
         b'T' => Reply::ConnectedSent(data.to_vec()),
         b'U' => Reply::Unproto(data.to_vec()),
         b'G' => {
-            let s = std::str::from_utf8(data)?;
+            let s = std::str::from_utf8(data).map_err(Error::other)?;
             let (count, ports) = {
                 let mut np = s.splitn(2, ';');
-                let count = np.next().expect("TODO: custom error").parse()?;
+                let count = np
+                    .next()
+                    .expect("TODO: custom error")
+                    .parse()
+                    .map_err(Error::other)?;
                 let ports = np
                     .next()
                     .expect("TODO: custom error")
@@ -169,7 +174,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'Y' => Reply::FramesOutstandingConnection(u32::from_le_bytes(
             data[0..4].try_into().expect("can't happen: bytes to u32"),
         )),
-        b'H' => Reply::HeardStations(std::str::from_utf8(data)?.to_string()),
+        b'H' => Reply::HeardStations(std::str::from_utf8(data).map_err(Error::other)?.to_string()),
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
         b'K' => Reply::Raw(data.to_vec()),
@@ -350,8 +355,8 @@ impl AGW {
         debug!("Creating AGW to {addr}");
         let (tx, rx) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
-        let wstream = TcpStream::connect(addr)?;
-        let rstream = wstream.try_clone()?;
+        let wstream = TcpStream::connect(addr).map_err(Error::other)?;
+        let rstream = wstream.try_clone().map_err(Error::other)?;
         let agw = AGW {
             rx,
             tx: tx2,
@@ -373,7 +378,7 @@ impl AGW {
     }
 
     fn send(&mut self, msg: &[u8]) -> Result<()> {
-        self.tx.send(msg.to_vec())?;
+        self.tx.send(msg.to_vec()).map_err(Error::other)?;
         Ok(())
     }
 
@@ -383,9 +388,9 @@ impl AGW {
 
     fn writer(mut stream: TcpStream, rx: mpsc::Receiver<Vec<u8>>) -> Result<()> {
         loop {
-            let buf = rx.recv()?;
+            let buf = rx.recv().map_err(Error::other)?;
             // TODO: do full write.
-            let _ = stream.write(&buf)?;
+            let _ = stream.write(&buf).map_err(Error::other)?;
         }
     }
 
@@ -404,7 +409,7 @@ impl AGW {
             let reply = parse_reply(&header, &payload)?;
             trace!("Got reply: {}", reply.description());
             let done = matches!(reply, Reply::Disconnect);
-            tx.send((header, reply))?;
+            tx.send((header, reply)).map_err(Error::other)?;
             if done {
                 break Ok(());
             }
@@ -424,7 +429,7 @@ impl AGW {
     pub fn version(&mut self) -> Result<(u16, u16)> {
         self.send(&Packet::VersionQuery.serialize())?;
         loop {
-            let (h, r) = self.rx.recv()?;
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::Version(maj, min) => return Ok((maj, min)),
                 other => self.rx_enqueue(h, other),
@@ -436,7 +441,7 @@ impl AGW {
     pub fn port_info(&mut self) -> Result<PortInfo> {
         self.send(&Packet::PortInfoQuery.serialize())?;
         loop {
-            let (h, r) = self.rx.recv()?;
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::PortInfo(i) => return Ok(i),
                 other => self.rx_enqueue(h, other),
@@ -446,9 +451,10 @@ impl AGW {
 
     /// Get port capabilities of the AGW "port".
     pub fn port_cap(&mut self, port: Port) -> Result<PortCaps> {
-        self.send(&Packet::PortCapQuery(port).serialize())?;
+        self.send(&Packet::PortCapQuery(port).serialize())
+            .map_err(Error::other)?;
         loop {
-            let (h, r) = self.rx.recv()?;
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::PortCaps(i) => return Ok(i),
                 other => self.rx_enqueue(h, other),
@@ -485,6 +491,10 @@ impl AGW {
     ///
     /// Presumably needed for incoming connection, but incoming
     /// connections are not tested yet.
+    ///
+    /// # Errors
+    ///
+    /// If underlying connection fails.
     pub fn register_callsign(&mut self, port: Port, pid: Pid, src: &Call) -> Result<()> {
         debug!("Registering callsign");
         self.send(&Packet::RegisterCallsign(port, pid, src.clone()).serialize())?;
@@ -525,7 +535,7 @@ impl AGW {
         }
         let connect_string;
         loop {
-            let (head, r) = self.rx.recv()?;
+            let (head, r) = self.rx.recv().map_err(Error::other)?;
             if (head.src.as_ref() != Some(dst)) || (head.dst.as_ref() != Some(src)) {
                 //eprintln!("Got packet not for us");
                 continue;
@@ -583,7 +593,7 @@ impl AGW {
             }
             match payload {
                 Reply::ConnectedData(data) => {
-                    let ret = data.to_vec();
+                    let ret = data.clone();
                     let mut tail = self.rxqueue.split_off(*n);
                     tail.pop_front();
                     self.rxqueue.append(&mut tail);
@@ -600,7 +610,7 @@ impl AGW {
 
         // Next packet not in the queue. Wait.
         loop {
-            let (h, r) = self.rx.recv()?;
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::ConnectedData(i) => return Ok(i),
                 other => self.rx_enqueue(h, other),

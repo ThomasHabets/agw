@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::io::{Read, Write};
+
+use crate::Result;
 
 pub trait Wrapper {
     fn wrap(&self, input: &[u8]) -> Result<Vec<u8>>;

@@ -17,7 +17,7 @@ impl Call {
     /// characters.
     pub fn from_bytes(bytes: &[u8]) -> Result<Call> {
         if bytes.len() > 10 {
-            return Err(Error::Plain(format!(
+            return Err(Error::Msg(format!(
                 "callsign '{bytes:?}' is longer than 10 characters"
             )));
         }
@@ -27,7 +27,7 @@ impl Call {
         for (i, &item) in bytes.iter().enumerate() {
             // TODO: is slash valid?
             if item != 0 && !item.is_ascii_alphanumeric() && item != b'-' {
-                return Err(Error::Plain(format!(
+                return Err(Error::Msg(format!(
                     "callsign includes invalid character {item:?}"
                 )));
             }

@@ -42,7 +42,7 @@ async fn bidir(mut con: Connection<'_>, mut stream: TcpStream) -> Result<()> {
                 stream.write_all(&data).await?;
                 }
                 Ok(other) => info!("Ignoring non-data packet {other:?}"),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             };
             },
             n = stream.read(&mut buf) => {

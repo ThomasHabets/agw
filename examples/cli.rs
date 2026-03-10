@@ -98,7 +98,7 @@ fn main() -> Result<()> {
             }
             con.disconnect()?;
         }
-    };
+    }
     Ok(())
 }
 

@@ -1,6 +1,7 @@
-use anyhow::Result;
 use libc::c_void;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write};
+
+use crate::{Error, Result};
 
 type BinaryCall = [u8; 7];
 fn empty_call() -> BinaryCall {
@@ -14,18 +15,18 @@ pub fn parse_call(call: &str) -> Result<BinaryCall> {
     let split: Vec<_> = call.splitn(2, '-').collect();
     let (call, ssid) = match split.len() {
         1 => (split[0], 0),
-        2 => (split[0], split[1].parse::<u8>()?),
+        2 => (split[0], split[1].parse::<u8>().map_err(Error::other)?),
         _ => panic!(),
     };
     if ssid > 15 {
-        return Err(anyhow::Error::msg("SSID out of range in {call}"));
+        return Err(Error::msg("SSID out of range in {call}"));
     }
     if call.len() < 3 || call.len() > 6 {
-        return Err(anyhow::Error::msg("SSID out of range in {call}"));
+        return Err(Error::msg("SSID out of range in {call}"));
     }
     for (i, ch) in call.chars().enumerate() {
         if !ch.is_ascii_alphanumeric() {
-            return Err(anyhow::Error::msg("non-alphanum in {call}"));
+            return Err(Error::msg("non-alphanum in {call}"));
         }
         let ch = ch
             .to_uppercase()
@@ -81,7 +82,6 @@ pub struct full_sockaddr_ax25 {
 
 mod primitive {
     use super::*;
-    use anyhow::Result;
     pub fn socket() -> Result<FD> {
         let fd = FD::new(unsafe { libc::socket(libc::AF_AX25, libc::SOCK_SEQPACKET, 0) });
         fd.get().ok_or(std::io::Error::last_os_error())?;
@@ -142,7 +142,7 @@ mod primitive {
             == unsafe {
                 libc::connect(
                     fd.get()
-                        .ok_or(anyhow::Error::msg("calling connect() with invalid socket"))?,
+                        .ok_or(Error::msg("calling connect() with invalid socket"))?,
                     sa_ptr,
                     std::mem::size_of::<full_sockaddr_ax25>() as u32,
                 )
@@ -154,7 +154,7 @@ mod primitive {
     }
 
     pub fn read(fd: &FD, buf: &mut [u8]) -> std::io::Result<usize> {
-        let fd = fd.get().ok_or(Error::new(
+        let fd = fd.get().ok_or(std::io::Error::new(
             ErrorKind::Other,
             "read() called on closed socket",
         ))?;
@@ -165,7 +165,7 @@ mod primitive {
         Ok(rc as usize)
     }
     pub fn write(fd: &FD, buf: &[u8]) -> std::io::Result<usize> {
-        let fd = fd.get().ok_or(Error::new(
+        let fd = fd.get().ok_or(std::io::Error::new(
             ErrorKind::Other,
             "write() called on closed socket",
         ))?;
@@ -184,9 +184,9 @@ impl NativeStream {
         call: &BinaryCall,
         digis: &[BinaryCall],
     ) -> Result<Self> {
-        let fd = primitive::socket()?;
-        primitive::bind(&fd, mycall, &[*radio])?;
-        primitive::connect(&fd, call, digis)?;
+        let fd = primitive::socket().map_err(Error::other)?;
+        primitive::bind(&fd, mycall, &[*radio]).map_err(Error::other)?;
+        primitive::connect(&fd, call, digis).map_err(Error::other)?;
         Ok(Self { fd })
     }
 }

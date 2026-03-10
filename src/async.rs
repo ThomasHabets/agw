@@ -1,4 +1,3 @@
-use anyhow::{Error, Result};
 use log::debug;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6,6 +5,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::{parse_header, Call, Header, Packet, Pid, Port, HEADER_LEN};
+use crate::{Error, Result};
 
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -69,7 +69,7 @@ impl RuleMatch {
                     return port == port2 && src == src2 && dst == dst2;
                 }
             }
-        };
+        }
         false
     }
 }
@@ -80,6 +80,7 @@ pub struct Router {
 }
 
 impl Router {
+    #[must_use]
     pub fn new() -> Router {
         Self {
             ident: Mutex::new(0),
@@ -92,7 +93,7 @@ impl Router {
             *ident += 1;
             *ident
         };
-        self.rules.lock().unwrap().push(Rule { m, ident, tx });
+        self.rules.lock().unwrap().push(Rule { ident, m, tx });
         RuleHandle::new(ident, Arc::downgrade(self))
     }
     pub fn del(&self, ident: RuleIdent) {
@@ -115,7 +116,7 @@ impl Router {
         let rules = self.rules.lock().unwrap().clone();
         for rule in rules.iter() {
             if rule.m.matches(&packet) {
-                rule.tx.send(packet.clone()).await?;
+                rule.tx.send(packet.clone()).await.map_err(Error::other)?;
                 any = true;
             }
         }
@@ -158,7 +159,7 @@ impl Pipo {
         }
     }
     async fn send(&self, packet: Packet) -> Result<()> {
-        self.tx.send(packet).await.map_err(|e| anyhow::anyhow!(e))
+        self.tx.send(packet).await.map_err(Error::other)
     }
     /*    async fn recv(&self) -> Option<Packet> {
         self.rx.lock().await.recv().await
@@ -177,7 +178,7 @@ impl Pipo {
                     // TODO: what happens to partial reads?
                     ok = con.read_exact(&mut header) => {
                         ok?;
-                        state = PIPOState::GotHeader(parse_header(&header)?)
+                        state = PIPOState::GotHeader(parse_header(&header)?);
                     },
                     p = rx.recv() => match p {
                         Some(p) => con.write_all(&p.serialize()).await?,
@@ -208,7 +209,7 @@ impl Pipo {
                                     };
                     }
                 }
-            };
+            }
         }
     }
 }
@@ -219,6 +220,11 @@ pub struct AGW {
 }
 
 impl AGW {
+    /// Connect to AGWPE.
+    ///
+    /// # Errors
+    ///
+    /// If connection establishment fails.
     pub async fn new(addr: &str) -> Result<AGW> {
         let router = Arc::new(Router::new());
         let r2 = router.clone();
@@ -227,6 +233,11 @@ impl AGW {
             router,
         })
     }
+    /// Send some data on connection.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the underlying connection fails.
     pub async fn send(&self, data: Packet) -> Result<()> {
         self.con.send(data).await
     }
@@ -282,8 +293,8 @@ impl AGW {
         // Wait for connection established.
         let estab = tokio::time::timeout(CONNECTION_TIMEOUT, rx.recv())
             .await
-            .expect("connection timeout")
-            .ok_or(Error::msg("TODO"));
+            .map_err(Error::other)?
+            .ok_or(Error::msg("no packet"));
         drop(ident);
 
         let estab = estab?;

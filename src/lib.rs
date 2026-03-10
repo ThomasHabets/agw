@@ -25,7 +25,11 @@ pub mod native;
 pub enum Error {
     /// An error with only a plain text message.
     #[error("An error occurred: {0}")]
-    Plain(String),
+    Msg(String),
+
+    /// An IO error without a known file associated.
+    #[error("IO Error: {0}")]
+    Io(#[from] std::io::Error),
 
     /// A wrapper around another error.
     #[error("{msg:?}: {source:?}")]
@@ -34,6 +38,18 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send + Sync>,
         msg: Option<String>,
     },
+}
+
+impl Error {
+    fn msg<T: Into<String>>(m: T) -> Error {
+        Error::Msg(m.into())
+    }
+    fn other(e: impl std::error::Error + Send + Sync + 'static) -> Error {
+        Error::Other {
+            source: Box::new(e),
+            msg: None,
+        }
+    }
 }
 
 /// Result convenience type.

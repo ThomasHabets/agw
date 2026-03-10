@@ -1,6 +1,7 @@
-use crate::{Call, Header};
-use anyhow::{Error, Result};
 use log::debug;
+
+use crate::{Call, Header};
+use crate::{Error, Result};
 
 const CMD_CONNECT: u8 = b'C';
 const CMD_DATA: u8 = b'D';
@@ -244,7 +245,7 @@ impl Packet {
                 Packet::VersionReply { major, minor }
             }
             CMD_CONNECT => {
-                let s = String::from_utf8(data.to_vec())?;
+                let s = String::from_utf8(data.to_vec()).map_err(Error::other)?;
                 let src = header
                     .src
                     .clone()
