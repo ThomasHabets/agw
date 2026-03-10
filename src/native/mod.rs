@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_bad_calls() -> Result<()> {
+    fn parse_bad_calls() {
         for call in [
             "",
             "M",
@@ -252,6 +252,5 @@ mod tests {
                 panic!("succeeded for {call} into {v:?}, should fail");
             }
         }
-        Ok(())
     }
 }

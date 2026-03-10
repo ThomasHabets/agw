@@ -20,7 +20,7 @@ fn main2() -> Result<()> {
     let mut stream = agw::wrap::Wrap::new(stream, wrapper);
 
     for line in std::io::stdin().lock().lines() {
-        stream.write(line?.as_bytes()).expect("write");
+        stream.write_all(line?.as_bytes()).expect("write");
         loop {
             let mut buf = [0u8; 1024];
             let n = match stream.read(&mut buf) {

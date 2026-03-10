@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -uoe pipefail
+if [[ ${SLOW:-} = "true" ]]; then
+        cd "$TICKBOX_TEMPDIR/work"
+        for feature in native crypto; do
+                export CARGO_TARGET_DIR="$TICKBOX_CWD/target/${TICKBOX_BRANCH}.test.feature.${feature}"
+                cargo +nightly test -F "${feature}"
+                if [[ ${CLEANUP:-} = true ]]; then
+                        rm -fr "${CARGO_TARGET_DIR?}"
+                fi
+        done
+fi

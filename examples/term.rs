@@ -42,7 +42,11 @@ fn run_ui(
     siv.with_theme(|t| {
         //t.shadow = false;
         //t.borders = cursive::theme::BorderStyle::None;
-        use cursive::theme::{BaseColor::*, Color::*, PaletteColor::*};
+        use cursive::theme::{
+            BaseColor::White,
+            Color::{Dark, Rgb},
+            PaletteColor::{Primary, TitlePrimary, View},
+        };
         // Full palette list from
         // https://docs.rs/cursive/0.20.0/cursive/theme/struct.Palette.html
         //   Background
@@ -73,11 +77,13 @@ fn run_ui(
     )
     .scroll_strategy(ScrollStrategy::StickToBottom)
     .on_scroll(|s, _rect| {
-        if let None = s.call_on_name("scroll", |e: &mut ScrollView<ResizedView<TextView>>| {
+        if s.call_on_name("scroll", |e: &mut ScrollView<ResizedView<TextView>>| {
             if e.is_at_bottom() {
                 e.set_scroll_strategy(ScrollStrategy::StickToBottom);
             }
-        }) {
+        })
+        .is_none()
+        {
             error!("Scroll is-at-bottom check callback failed to find the scroll view");
         }
     })
@@ -95,7 +101,7 @@ fn run_ui(
                             s.call_on_name("edit", |e: &mut EditView| {
                                 e.set_content("");
                             })
-                            .expect("call on name")
+                            .expect("call on name");
                         })
                         .style(ColorStyle::new(
                             ColorType::Color(Color::Rgb(0, 0, 0)),
@@ -114,7 +120,7 @@ fn run_ui(
         std::panic::set_hook(Box::new(|panic_info| {
             let backtrace = backtrace::Backtrace::new();
             error!("Status update thread panic: {panic_info:?}. Backtrace:");
-            error!("{:?}", backtrace);
+            error!("{backtrace:?}");
         }));
         for c in status_rx {
             status2.set_content(ascii7_to_str(c.as_bytes()));
@@ -189,7 +195,7 @@ impl CQLogEntry {
     }
 }
 
-fn cqlogthread_handle(logf: &mut std::fs::File, msg: CQLogEntry) -> Result<()> {
+fn cqlogthread_handle(logf: &mut std::fs::File, msg: &CQLogEntry) -> Result<()> {
     use std::io::Write;
     let serialized = serde_json::to_string(&msg)? + "\n";
     logf.write_all(serialized.as_bytes())?;
@@ -197,19 +203,21 @@ fn cqlogthread_handle(logf: &mut std::fs::File, msg: CQLogEntry) -> Result<()> {
 }
 
 fn cqlogthread(mut logf: std::fs::File, rx: mpsc::Receiver<CQLogEntry>) {
-    if let Err(e) = cqlogthread_handle(&mut logf, CQLogEntry::meta("Log opening".into())) {
+    if let Err(e) = cqlogthread_handle(&mut logf, &CQLogEntry::meta("Log opening".into())) {
         error!("Failed to log: {e}");
     }
     for msg in rx {
-        if let Err(e) = cqlogthread_handle(&mut logf, msg) {
+        if let Err(e) = cqlogthread_handle(&mut logf, &msg) {
             error!("Failed to log: {e}");
         }
     }
-    if let Err(e) = cqlogthread_handle(&mut logf, CQLogEntry::meta("Log closing".into())) {
+    if let Err(e) = cqlogthread_handle(&mut logf, &CQLogEntry::meta("Log closing".into())) {
         error!("Failed to log: {e}");
     }
 }
 
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)]
 fn main() -> Result<()> {
     let opt = Opts::parse();
 
@@ -227,7 +235,7 @@ fn main() -> Result<()> {
         env_logger::Builder::new()
             .format(move |buf, record| {
                 // ISO8601 / RFC3339 time format.
-                const RFC3339: &'static str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
+                const RFC3339: &str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
                 writeln!(
                     buf,
                     "{} {} {} {}:{} {}",
@@ -274,9 +282,9 @@ fn main() -> Result<()> {
         std::panic::set_hook(Box::new(|panic_info| {
             let backtrace = backtrace::Backtrace::new();
             error!("UI thread panic: {panic_info:?}. Backtrace:");
-            error!("{:?}", backtrace);
+            error!("{backtrace:?}");
         }));
-        run_ui(up_tx, down_rx, status_rx)
+        run_ui(up_tx, down_rx, status_rx);
     });
     let sender = con.sender();
     // up
@@ -296,19 +304,19 @@ fn main() -> Result<()> {
                 let _ = cq_tx2.send(CQLogEntry::message(CQLogEntryMessage {
                     src: src2.clone(),
                     dst: dst2.clone(),
-                    data: data,
+                    data,
                 }));
                 sender.send(bdata).expect("sending command");
             }
             Err(e) => {
                 // UI exited.
-                debug!("UI exited, up_rx got: {}", e);
+                debug!("UI exited, up_rx got: {e}");
                 sender
                     .send(make_writer.disconnect())
                     .expect("failed to send disconnect");
                 return;
             }
-        };
+        }
     });
     // down
     loop {
@@ -329,7 +337,7 @@ fn main() -> Result<()> {
         }))?;
 
         if let Err(e) = down_tx.send(plain) {
-            debug!("down_tx failed: {}", e);
+            debug!("down_tx failed: {e}");
             break;
         }
     }
@@ -346,11 +354,11 @@ fn main() -> Result<()> {
 // TODO: smarter
 fn ascii7_to_str(bytes: &[u8]) -> String {
     let mut s = String::new();
-    for b in bytes.iter() {
+    for b in bytes {
         match b {
             0 => {}
             b => s.push((b & 0x7f) as char),
-        };
+        }
     }
     s
 }

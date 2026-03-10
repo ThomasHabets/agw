@@ -39,6 +39,7 @@ fn load_certs(path: &std::path::Path) -> std::io::Result<Vec<CertificateDer<'sta
     rustls_pemfile::certs(&mut BufReader::new(File::open(path)?)).collect()
 }
 
+#[allow(clippy::unnecessary_debug_formatting)]
 fn load_key(path: &std::path::Path) -> std::io::Result<PrivateKeyDer<'static>> {
     debug!("Loading key {path:?}");
     Ok(rustls_pemfile::private_key(&mut BufReader::new(File::open(path)?))?.unwrap())
@@ -69,12 +70,12 @@ async fn run_connection(conn: tokio::net::TcpStream, acceptor: TlsAcceptor) -> R
     // TODO: Proxy the request through AGW.
 
     // Write reply.
-    stream.write(b"20 text/gemini\r\nHello world").await?;
+    stream.write_all(b"20 text/gemini\r\nHello world").await?;
     debug!("Write finished");
     Ok(())
 }
 
-async fn start_connection(
+fn start_connection(
     (conn, addr): (tokio::net::TcpStream, std::net::SocketAddr),
     acceptor: TlsAcceptor,
 ) {
@@ -113,6 +114,6 @@ async fn main() -> Result<()> {
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
     loop {
-        start_connection(listener.accept().await?, acceptor.clone()).await;
+        start_connection(listener.accept().await?, acceptor.clone());
     }
 }

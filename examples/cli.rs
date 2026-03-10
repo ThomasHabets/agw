@@ -90,11 +90,11 @@ fn main() -> Result<()> {
             agw.register_callsign(port, pid, src)?;
             let mut con = agw.connect(port, pid, src, &Call::from_str(&dst)?, &[])?;
             con.write(b"echo hello world\n")?;
-            eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
-            std::thread::sleep(std::time::Duration::from_millis(3000));
+            eprintln!("Read: {:?}", ascii7_to_str(&con.read()?));
+            std::thread::sleep(std::time::Duration::from_secs(3));
             con.write(b"BYE\r")?;
             for _ in 0..10 {
-                eprintln!("Read: {:?}", ascii7_to_str(con.read()?));
+                eprintln!("Read: {:?}", ascii7_to_str(&con.read()?));
             }
             con.disconnect()?;
         }
@@ -102,9 +102,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn ascii7_to_str(bytes: Vec<u8>) -> String {
+fn ascii7_to_str(bytes: &[u8]) -> String {
     let mut s = String::new();
-    for b in bytes.iter() {
+    for b in bytes {
         s.push((b & 0x7f) as char);
     }
     s
