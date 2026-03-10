@@ -188,8 +188,8 @@ impl Pipo {
                     };
                 }
                 PIPOState::GotHeader(ref header) => {
-                    if header.data_len() > 0 {
-                        let mut payload = vec![0; header.data_len() as usize];
+                    if header.data_len > 0 {
+                        let mut payload = vec![0; header.data_len as usize];
                         tokio::select! {
                                         ok = con.read_exact(&mut payload) => {
                             ok?;
@@ -327,6 +327,11 @@ pub struct Connection<'a> {
 }
 
 impl Connection<'_> {
+    /// Receive packet from connection.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the connection fails.
     pub async fn recv(&mut self) -> Result<Packet> {
         let _ = self.connect_string;
         let _ = self.disconnected;
@@ -334,6 +339,11 @@ impl Connection<'_> {
         let _ = self.dst;
         self.rx.recv().await.ok_or(Error::msg("recv failed"))
     }
+    /// Send data on connection.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the connection fails.
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         let packet = Packet::Data {
             port: self.port,

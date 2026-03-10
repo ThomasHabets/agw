@@ -43,9 +43,10 @@ pub struct PortCaps {
     pub slot_time: u8,
     pub max_frame: u8,
 
-    /// How Many connections are active on this port
+    /// How many connections are active on this port
     pub active_connections: u8,
-    /// HowManyBytes (received in the last 2 minutes) as a 32 bits (4 bytes)
+
+    /// How many bytes received in the last 2 minutes as a 32 bits (4 bytes)
     /// integer. Updated every two minutes.
     pub bytes_per_2min: u32,
 }
@@ -75,9 +76,9 @@ impl Reply {
     fn description(&self) -> String {
         match self {
             Reply::Disconnect => "Disconnect".to_string(),
-            Reply::ConnectedData(data) => format!("ConnectedData: {:?}", data),
-            Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
-            Reply::Unproto(data) => format!("Received unproto: {:?}", data),
+            Reply::ConnectedData(data) => format!("ConnectedData: {data:?}"),
+            Reply::ConnectedSent(data) => format!("ConnectedSent: {data:?}"),
+            Reply::Unproto(data) => format!("Received unproto: {data:?}"),
             Reply::PortInfo(s) => format!("Port info: {s:?}"),
             Reply::PortCaps(s) => format!("Port caps: {s:?}"),
             Reply::Connected(s) => format!("Connected: {s}"),
@@ -96,7 +97,7 @@ impl Reply {
 
 fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     // TODO: confirm data len, since most replies will have fixed size.
-    Ok(match header.data_kind() {
+    Ok(match header.data_kind {
         b'R' => {
             let major = u16::from_le_bytes(
                 data[0..2]
@@ -199,6 +200,8 @@ impl MakeWriter {
         }
         .serialize())
     }
+    /// Make a disconnect packet.
+    #[must_use]
     pub fn disconnect(&self) -> Vec<u8> {
         Packet::Disconnect {
             port: self.port,
@@ -391,8 +394,8 @@ impl AGW {
             let mut header = [0_u8; HEADER_LEN];
             stream.read_exact(&mut header)?;
             let header = parse_header(&header)?;
-            let payload = if header.data_len() > 0 {
-                let mut payload = vec![0; header.data_len() as usize];
+            let payload = if header.data_len > 0 {
+                let mut payload = vec![0; header.data_len as usize];
                 stream.read_exact(&mut payload)?;
                 payload
             } else {
@@ -523,7 +526,7 @@ impl AGW {
         let connect_string;
         loop {
             let (head, r) = self.rx.recv()?;
-            if (head.src().as_ref() != Some(dst)) || (head.dst().as_ref() != Some(src)) {
+            if (head.src.as_ref() != Some(dst)) || (head.dst.as_ref() != Some(src)) {
                 //eprintln!("Got packet not for us");
                 continue;
             }
@@ -575,7 +578,7 @@ impl AGW {
         // First check the existing queue.
         for frame in self.rxqueue.iter().enumerate() {
             let (n, (head, payload)) = &frame;
-            if (head.src().as_ref() != Some(remote)) || (head.dst().as_ref() != Some(me)) {
+            if (head.src.as_ref() != Some(remote)) || (head.dst.as_ref() != Some(me)) {
                 continue;
             }
             match payload {

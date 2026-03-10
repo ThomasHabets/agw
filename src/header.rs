@@ -2,34 +2,18 @@ use crate::{Call, Pid, Port};
 
 #[derive(Clone, Debug)]
 pub struct Header {
-    port: Port,
-    pid: Pid,
-    data_kind: u8,
-    data_len: u32,
-    src: Option<Call>,
-    dst: Option<Call>,
+    pub port: Port,
+    pub pid: Pid,
+    pub data_kind: u8,
+    pub data_len: u32,
+    pub src: Option<Call>,
+    pub dst: Option<Call>,
 }
 pub const HEADER_LEN: usize = 36;
 impl Header {
-    pub fn port(&self) -> Port {
-        self.port
-    }
-    pub fn pid(&self) -> Pid {
-        self.pid
-    }
-    pub fn data_kind(&self) -> u8 {
-        self.data_kind
-    }
-    pub fn data_len(&self) -> u32 {
-        self.data_len
-    }
-    pub fn src(&self) -> &Option<Call> {
-        &self.src
-    }
-    pub fn dst(&self) -> &Option<Call> {
-        &self.dst
-    }
-
+    /// Create new header.
+    // TODO remove this.
+    #[must_use]
     pub fn new(
         port: Port,
         data_kind: u8,
@@ -40,14 +24,16 @@ impl Header {
     ) -> Header {
         Header {
             port,
-            data_kind,
             pid,
+            data_kind,
             data_len,
             src,
             dst,
         }
     }
 
+    /// Serialize header.
+    #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut v = vec![0; HEADER_LEN];
         // Either the port parameter is not used (such as version or port info
@@ -57,10 +43,10 @@ impl Header {
         v[6] = self.pid.0;
 
         if let Some(src) = &self.src {
-            v.splice(8..18, src.as_bytes().iter().cloned());
+            v.splice(8..18, src.as_bytes().iter().copied());
         }
         if let Some(dst) = &self.dst {
-            v.splice(18..28, dst.as_bytes().iter().cloned());
+            v.splice(18..28, dst.as_bytes().iter().copied());
         }
         v.splice(28..32, u32::to_le_bytes(self.data_len));
         v

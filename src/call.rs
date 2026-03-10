@@ -1,4 +1,4 @@
-use anyhow::{Error, Result};
+use crate::{Error, Result};
 
 /// Callsign, including SSID.
 ///
@@ -10,11 +10,15 @@ pub struct Call {
 
 impl Call {
     /// Create callsign from ASCII bytes.
+    ///
+    /// # Errors
+    ///
+    /// If the callsign is in invalid format, such as containing non-ascii
+    /// characters.
     pub fn from_bytes(bytes: &[u8]) -> Result<Call> {
         if bytes.len() > 10 {
-            return Err(Error::msg(format!(
-                "callsign '{:?}' is longer than 10 characters",
-                bytes
+            return Err(Error::Plain(format!(
+                "callsign '{bytes:?}' is longer than 10 characters"
             )));
         }
         // NOTE: Callsigns here are not just real callsigns, but also
@@ -23,9 +27,8 @@ impl Call {
         for (i, &item) in bytes.iter().enumerate() {
             // TODO: is slash valid?
             if item != 0 && !item.is_ascii_alphanumeric() && item != b'-' {
-                return Err(Error::msg(format!(
-                    "callsign includes invalid character {:?}",
-                    item
+                return Err(Error::Plain(format!(
+                    "callsign includes invalid character {item:?}"
                 )));
             }
             arr[i] = item;
@@ -34,12 +37,15 @@ impl Call {
     }
 
     /// Bytes of the callsign string.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     /// Callsign as a string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
+        #[allow(clippy::missing_panics_doc)]
         str::from_utf8(&self.bytes).expect("can't happen: call contains non-UTF8")
     }
 
@@ -48,6 +54,7 @@ impl Call {
     /// Sometimes this is the correct thing, for incoming/outgoing AGW packets.
     /// E.g. querying the outgoing packet queue does not have source nor
     /// destination.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         for b in self.bytes {
             if b != 0 {
@@ -59,8 +66,8 @@ impl Call {
 }
 
 impl std::str::FromStr for Call {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    type Err = Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Self::from_bytes(s.as_bytes())
     }
 }

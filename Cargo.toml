@@ -15,6 +15,7 @@ crossbeam-channel = "0.5.12"
 log = "0.4.21"
 tokio = { version = "1.37.0", features = ["full"] }
 libc = {version="0.2.155", optional=true}
+thiserror = "2.0.18"
 
 [build-dependencies]
 cc = "1.1.7"

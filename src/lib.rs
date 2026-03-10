@@ -1,3 +1,4 @@
+//#![allow(clippy::doc_markdown)]
 #![doc = include_str!("../README.md")]
 mod call;
 mod header;
@@ -19,3 +20,21 @@ pub mod proxy;
 
 #[cfg(feature = "native")]
 pub mod native;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    /// An error with only a plain text message.
+    #[error("An error occurred: {0}")]
+    Plain(String),
+
+    /// A wrapper around another error.
+    #[error("{msg:?}: {source:?}")]
+    Other {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+        msg: Option<String>,
+    },
+}
+
+/// Result convenience type.
+pub type Result<T> = std::result::Result<T, Error>;

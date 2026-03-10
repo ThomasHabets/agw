@@ -22,6 +22,11 @@ impl Proxy {
             down: ConnectionV2::new(down)?,
         })
     }
+    /// Run the proxy forever.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connections fail, or other protocol error.
     pub fn run(
         &mut self,
         cb_up: &dyn Fn(Packet) -> Option<Packet>,
@@ -40,7 +45,7 @@ impl Proxy {
                     }
                 },
                 Err(_e) => return Ok(()),
-                };
+                }
                     },
                     recv(self.up.rx) -> packet => {
                         debug!("Got {packet:?} from upstream");
@@ -51,7 +56,7 @@ impl Proxy {
                     }
                 },
                 Err(_e) => return Ok(()),
-                        };
+                        }
                     },
             };
         }
@@ -73,14 +78,14 @@ impl Drop for ConnectionV2 {
     }
 }
 impl ConnectionV2 {
-    fn rx_loop(mut rstream: TcpStream, tx: Sender<Packet>) -> Result<()> {
+    fn rx_loop(mut rstream: TcpStream, tx: &Sender<Packet>) -> Result<()> {
         loop {
             let mut header = [0_u8; crate::HEADER_LEN];
             rstream.read_exact(&mut header)?;
 
             let header = crate::parse_header(&header)?;
-            let payload = if header.data_len() > 0 {
-                let mut payload = vec![0; header.data_len() as usize];
+            let payload = if header.data_len > 0 {
+                let mut payload = vec![0; header.data_len as usize];
                 rstream.read_exact(&mut payload)?;
                 payload
             } else {
@@ -96,7 +101,7 @@ impl ConnectionV2 {
     fn new(rstream: TcpStream) -> Result<Self> {
         let mut wstream = rstream.try_clone()?;
         let (rxtx, rxrx) = unbounded::<Packet>();
-        let rxthread = std::thread::spawn(move || -> Result<()> { Self::rx_loop(rstream, rxtx) });
+        let rxthread = std::thread::spawn(move || -> Result<()> { Self::rx_loop(rstream, &rxtx) });
         let (txtx, txrx) = unbounded::<Packet>();
         let txthread = std::thread::spawn(move || {
             for packet in txrx {

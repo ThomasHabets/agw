@@ -2,7 +2,7 @@
 
 Rust library for speaking AGW with e.g. Direwolf
 
-https://github.com/ThomasHabets/agw
+<https://github.com/ThomasHabets/agw>
 
 ## Example usage
 

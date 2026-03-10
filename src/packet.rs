@@ -85,16 +85,20 @@ pub enum Packet {
 }
 
 impl Packet {
+    /// Serialize packet for AGW connection.
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Packet::VersionQuery => Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
             Packet::VersionReply { major, minor } => {
                 let data = vec![
-                    *major as u8,
+                    u8::try_from(*major & 0xff).expect("can't happen"),
                     (*major >> 8) as u8,
                     0,
                     0,
-                    *minor as u8,
+                    u8::try_from(*minor & 0xff).expect("can't happen"),
                     (*minor >> 8) as u8,
                     0,
                     0,
@@ -156,7 +160,7 @@ impl Packet {
                 }
                 */
                 let mut hops = Vec::new();
-                hops.push(via.len() as u8);
+                hops.push(u8::try_from(via.len()).expect("TODO: error or something"));
                 for call in via {
                     hops.extend_from_slice(call.as_bytes());
                 }
@@ -186,10 +190,10 @@ impl Packet {
                     *pid,
                     Some(src.clone()),
                     Some(dst.clone()),
-                    data.len() as u32,
+                    u32::try_from(data.len()).expect("TODO: error this, or make it impossible"),
                 )
                 .serialize(),
-                data.to_vec(),
+                data.clone(),
             ]
             .concat(),
             Packet::Unproto {
@@ -218,12 +222,12 @@ impl Packet {
         }
     }
     pub fn parse(header: &Header, data: &[u8]) -> Result<Packet> {
-        Ok(match header.data_kind() {
+        Ok(match header.data_kind {
             b'R' => {
                 if data.len() != 8 {
                     return Err(Error::msg(format!(
                         "version packet had wrong length {}, {data:?}",
-                        header.data_kind()
+                        header.data_kind
                     )));
                 }
 
@@ -242,11 +246,11 @@ impl Packet {
             CMD_CONNECT => {
                 let s = String::from_utf8(data.to_vec())?;
                 let src = header
-                    .src()
+                    .src
                     .clone()
                     .ok_or(Error::msg("connect missing src"))?;
                 let dst = header
-                    .dst()
+                    .dst
                     .clone()
                     .ok_or(Error::msg("connect missing src"))?;
                 if s.starts_with("*** CONNECTED WITH")
@@ -254,16 +258,16 @@ impl Packet {
                 {
                     debug!("Got ConnectionEstablished {s}");
                     Packet::ConnectionEstablished {
-                        port: header.port(),
-                        pid: header.pid(),
+                        port: header.port,
+                        pid: header.pid,
                         src: src.clone(),
                         dst: dst.clone(),
                     }
                 } else if s.starts_with("*** CONNECTED To Station") {
                     debug!("Got IncomingConnect {s}");
                     Packet::IncomingConnect {
-                        port: header.port(),
-                        pid: header.pid(),
+                        port: header.port,
+                        pid: header.pid,
                         src: src.clone(),
                         dst: dst.clone(),
                     }
@@ -273,14 +277,14 @@ impl Packet {
             }
             //b'd' => Packet::Disconnect,
             CMD_DATA => Packet::Data {
-                port: header.port(),
-                pid: header.pid(),
+                port: header.port,
+                pid: header.pid,
                 src: header
-                    .src()
+                    .src
                     .clone()
                     .ok_or(Error::msg("data with missing src"))?,
                 dst: header
-                    .dst()
+                    .dst
                     .clone()
                     .ok_or(Error::msg("data with missing dst"))?,
                 data: data.to_vec(),
@@ -288,7 +292,7 @@ impl Packet {
             _ => {
                 return Err(Error::msg(format!(
                     "unknown packet kind {}",
-                    header.data_kind()
+                    header.data_kind
                 )));
             }
         })
