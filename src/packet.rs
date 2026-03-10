@@ -26,6 +26,8 @@ pub enum Packet {
 
     /// Application: Port capability query.
     PortCapQuery(Port),
+
+    /// Application: Port info query.
     PortInfoQuery,
     RegisterCallsign(Port, Pid, Call),
     Connect {

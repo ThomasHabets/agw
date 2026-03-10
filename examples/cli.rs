@@ -61,7 +61,13 @@ fn main() -> Result<()> {
             let (a, b) = agw.version()?;
             eprintln!("AGW server version: {a}.{b}");
         }
-        Command::PortInfo => eprintln!("{}", agw.port_info()?),
+        Command::PortInfo => {
+            let info = agw.port_info()?;
+            println!("Port count: {}", info.count);
+            for port in info.ports {
+                println!("  {port}");
+            }
+        }
         Command::PortCap { port } => eprintln!("{}", agw.port_cap(port)?),
         Command::Unproto { src, dst, msg } => {
             let pid = agw::Pid(0xF0); // TODO: make a flag.

@@ -9,12 +9,22 @@ use std::sync::mpsc;
 
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
+/// Port information.
+#[derive(Debug)]
+pub struct PortInfo {
+    /// Number of ports.
+    pub count: usize,
+
+    /// Description of ports.
+    pub ports: Vec<String>,
+}
+
 enum Reply {
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
     Version(u16, u16),                // R.
     CallsignRegistration(bool),       // X.
-    PortInfo(String),                 // G. TODO: parse
+    PortInfo(PortInfo),               // G.
     PortCaps(String),                 // g. TODO: parse
     FramesOutstandingPort(u32),       // y.
     FramesOutstandingConnection(u32), // Y.
@@ -37,7 +47,7 @@ impl Reply {
             Reply::ConnectedData(data) => format!("ConnectedData: {:?}", data),
             Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
             Reply::Unproto(data) => format!("Received unproto: {:?}", data),
-            Reply::PortInfo(s) => format!("Port info: {}", s),
+            Reply::PortInfo(s) => format!("Port info: {s:?}"),
             Reply::PortCaps(s) => format!("Port caps: {}", s),
             Reply::Connected(s) => format!("Connected: {}", s),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
@@ -75,7 +85,22 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'd' => Reply::Disconnect,
         b'T' => Reply::ConnectedSent(data.to_vec()),
         b'U' => Reply::Unproto(data.to_vec()),
-        b'G' => Reply::PortInfo(std::str::from_utf8(data)?.to_string()),
+        b'G' => {
+            let s = std::str::from_utf8(data)?;
+            let (count, ports) = {
+                let mut np = s.splitn(2, ';');
+                let count = np.next().expect("TODO: custom error").parse()?;
+                let ports = np
+                    .next()
+                    .expect("TODO: custom error")
+                    .split(';')
+                    .map(|s| s.to_string())
+                    .filter(|s| s != "\0")
+                    .collect();
+                (count, ports)
+            };
+            Reply::PortInfo(PortInfo { count, ports })
+        }
         b'g' => {
             let rate = data[0];
             let traffic_level = data[1];
@@ -368,7 +393,7 @@ impl AGW {
     }
 
     /// Get some port info for the AGW endpoint.
-    pub fn port_info(&mut self) -> Result<String> {
+    pub fn port_info(&mut self) -> Result<PortInfo> {
         self.send(&Packet::PortInfoQuery.serialize())?;
         loop {
             let (h, r) = self.rx.recv()?;
