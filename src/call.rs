@@ -39,15 +39,8 @@ impl Call {
     }
 
     /// Callsign as a string.
-    pub fn string(&self) -> String {
-        let mut s = String::new();
-        for ch in self.bytes.iter() {
-            if *ch == 0 {
-                break;
-            }
-            s.push(*ch as char);
-        }
-        s
+    pub fn as_str(&self) -> &str {
+        str::from_utf8(&self.bytes).expect("can't happen: call contains non-UTF8")
     }
 
     /// Return true if the callsign is empty.

@@ -98,7 +98,7 @@ impl Packet {
                 dst,
             } => [
                 Header::new(*port, b'C', *pid, Some(src.clone()), Some(dst.clone()), 0).serialize(),
-                format!("*** CONNECTED To Station {}", src.string())
+                format!("*** CONNECTED To Station {}", src.as_str())
                     .as_bytes()
                     .to_vec(),
             ]
@@ -110,7 +110,7 @@ impl Packet {
                 dst,
             } => [
                 Header::new(*port, b'C', *pid, Some(src.clone()), Some(dst.clone()), 0).serialize(),
-                format!("*** CONNECTED With Station {}", src.string())
+                format!("*** CONNECTED With Station {}", src.as_str())
                     .as_bytes()
                     .to_vec(),
             ]
