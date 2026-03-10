@@ -14,15 +14,18 @@ pub struct SecKey {
 
 impl PubKey {
     fn new() -> Self {
+        let n = unsafe { crypto_sign_publickeybytes() };
         PubKey {
-            pubkey: vec![0; unsafe { crypto_sign_publickeybytes() } as usize],
+            pubkey: vec![0; usize::try_from(n).expect("TODO: better error")],
         }
     }
     pub fn load(fname: &std::path::Path) -> Result<PubKey> {
         // TODO: don't OOM if we point to the wrong place.
         let pubkey = std::fs::read(fname)
             .map_err(|e| Error::msg(format!("opening public key {}: {e}", fname.display())))?;
-        if pubkey.len() != unsafe { crypto_sign_publickeybytes() } as usize {
+        let n = unsafe { crypto_sign_publickeybytes() };
+        let n = usize::try_from(n).expect("TODO: better error");
+        if pubkey.len() != n {
             return Err(Error::msg("public key file has wrong size"));
         }
         Ok(PubKey { pubkey })
@@ -35,16 +38,19 @@ impl PubKey {
     }
 }
 impl SecKey {
+    #[must_use]
     fn new() -> Self {
-        SecKey {
-            seckey: vec![0; unsafe { crypto_sign_secretkeybytes() } as usize],
-        }
+        let n = unsafe { crypto_sign_secretkeybytes() };
+        let n = usize::try_from(n).expect("TODO: better error");
+        SecKey { seckey: vec![0; n] }
     }
     pub fn load(fname: &std::path::Path) -> Result<SecKey> {
         // TODO: don't OOM if we point to the wrong place.
         let seckey = std::fs::read(fname)
             .map_err(|e| Error::msg(format!("opening secret key {}: {e}", fname.display())))?;
-        if seckey.len() != unsafe { crypto_sign_secretkeybytes() } as usize {
+        let n = unsafe { crypto_sign_secretkeybytes() };
+        let n = usize::try_from(n).expect("TODO: better error");
+        if seckey.len() != n {
             return Err(Error::msg("secret key file has wrong size"));
         }
         Ok(SecKey { seckey })
@@ -101,14 +107,16 @@ fn init() {
 
 pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     init();
-    let mut sig = vec![0u8; msg.len() + unsafe { crypto_sign_bytes() } as usize];
+    let n = unsafe { crypto_sign_bytes() };
+    let n = usize::try_from(n).map_err(Error::other)?;
+    let mut sig = vec![0u8; msg.len() + n];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
     let mut siglen: libc::c_ulonglong = sig.len().try_into().map_err(Error::other)?;
     let rc = unsafe {
         crypto_sign(
             sig.as_mut_ptr(),
-            &mut siglen as *mut _,
+            &raw mut siglen,
             msg.as_ptr(),
             msg.len() as libc::c_ulonglong,
             key.as_ptr(),
@@ -117,20 +125,21 @@ pub fn sign(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     if rc == -1 {
         Err(Error::msg("crypto_sign_detached() failed"))
     } else {
-        Ok(sig[..(siglen as usize)].to_vec())
+        Ok(sig[..(usize::try_from(siglen).map_err(Error::other)?)].to_vec())
     }
 }
 
 pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     init();
-    let mut sig = vec![0u8; unsafe { crypto_sign_bytes() } as usize];
+    let n = unsafe { crypto_sign_bytes() };
+    let mut sig = vec![0u8; usize::try_from(n).map_err(Error::other)?];
     // siglen is actually a strict out parameter. But in case that changes,
     // let's set it.
     let mut siglen: libc::c_ulonglong = sig.len().try_into().map_err(Error::other)?;
     let rc = unsafe {
         crypto_sign_detached(
             sig.as_mut_ptr(),
-            &mut siglen as *mut _,
+            &raw mut siglen,
             msg.as_ptr(),
             msg.len() as libc::c_ulonglong,
             key.as_ptr(),
@@ -140,14 +149,16 @@ pub fn sign_detached(msg: &[u8], key: &SecKey) -> Result<Vec<u8>> {
     if rc == -1 {
         Err(Error::msg("crypto_sign_detached() failed"))
     } else {
-        Ok(sig[..(siglen as usize)].to_vec())
+        Ok(sig[..usize::try_from(siglen).map_err(Error::other)?].to_vec())
     }
 }
 
+#[must_use]
 pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
     init();
     let siglen = sig.len();
-    let rightlen = unsafe { crypto_sign_bytes() } as usize;
+    let rightlen = unsafe { crypto_sign_bytes() };
+    let rightlen = usize::try_from(rightlen).expect("TODO: better error");
     if siglen < rightlen {
         error!("Signature length incorrect: expected {siglen} >= {rightlen}");
         return None;
@@ -157,7 +168,7 @@ pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
     let rc = unsafe {
         crypto_sign_open(
             msg.as_mut_ptr(),
-            &mut msglen as *mut libc::c_ulonglong,
+            &raw mut msglen,
             sig.as_ptr(),
             siglen as libc::c_ulonglong,
             pubkey.as_ptr(),
@@ -170,10 +181,12 @@ pub fn open(sig: &[u8], pubkey: &PubKey) -> Option<Vec<u8>> {
     }
 }
 
+#[must_use]
 pub fn verify_detached(sig: &[u8], msg: &[u8], pubkey: &PubKey) -> bool {
     init();
     let siglen = sig.len();
-    let rightlen = unsafe { crypto_sign_bytes() } as usize;
+    let rightlen = unsafe { crypto_sign_bytes() };
+    let rightlen = usize::try_from(rightlen).expect("TODO: better error");
     if siglen != rightlen {
         error!("Signature length incorrect: expected {rightlen} got {siglen}");
         return false;

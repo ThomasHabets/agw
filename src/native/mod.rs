@@ -1,9 +1,10 @@
 use libc::c_void;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 
 use crate::{Error, Result};
 
 type BinaryCall = [u8; 7];
+
 fn empty_call() -> BinaryCall {
     [0u8; 7]
 }
@@ -81,12 +82,14 @@ pub struct full_sockaddr_ax25 {
 }
 
 mod primitive {
+    #[allow(clippy::wildcard_imports)]
     use super::*;
     pub fn socket() -> Result<FD> {
         let fd = FD::new(unsafe { libc::socket(libc::AF_AX25, libc::SOCK_SEQPACKET, 0) });
         fd.get().ok_or(std::io::Error::last_os_error())?;
         Ok(fd)
     }
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn make_sa(call: &BinaryCall, digis: &[BinaryCall]) -> Result<full_sockaddr_ax25> {
         let mut sax25_digipeater = [empty_call(); 8];
         for (i, digi) in digis.iter().enumerate() {
@@ -97,9 +100,9 @@ mod primitive {
             sax25_digipeater[i] = *digi;
         }
         Ok(full_sockaddr_ax25 {
-            sax25_family: libc::AF_AX25 as libc::sa_family_t,
+            sax25_family: libc::sa_family_t::try_from(libc::AF_AX25).expect("can't happen"),
             sax25_call: *call,
-            sax25_ndigis: digis.len() as libc::c_int,
+            sax25_ndigis: libc::c_int::try_from(digis.len()).map_err(Error::other)?,
             sax25_digipeater,
         })
     }
@@ -111,7 +114,7 @@ mod primitive {
             libc::bind(
                 fd.get().ok_or(std::io::Error::last_os_error())?,
                 sa_ptr,
-                std::mem::size_of::<full_sockaddr_ax25>() as u32,
+                u32::try_from(std::mem::size_of::<full_sockaddr_ax25>()).map_err(Error::other)?,
             )
         };
         if rc == -1 {
@@ -144,7 +147,8 @@ mod primitive {
                     fd.get()
                         .ok_or(Error::msg("calling connect() with invalid socket"))?,
                     sa_ptr,
-                    std::mem::size_of::<full_sockaddr_ax25>() as u32,
+                    u32::try_from(std::mem::size_of::<full_sockaddr_ax25>())
+                        .map_err(Error::other)?,
                 )
             }
         {
@@ -153,27 +157,25 @@ mod primitive {
         Ok(())
     }
 
-    pub fn read(fd: &FD, buf: &mut [u8]) -> std::io::Result<usize> {
-        let fd = fd.get().ok_or(std::io::Error::new(
-            ErrorKind::Other,
-            "read() called on closed socket",
-        ))?;
+    pub fn read(fd: &FD, buf: &mut [u8]) -> Result<usize> {
+        let fd = fd
+            .get()
+            .ok_or(std::io::Error::other("read() called on closed socket"))?;
         let rc = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
         if rc < 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error().into());
         }
-        Ok(rc as usize)
+        usize::try_from(rc).map_err(Error::other)
     }
-    pub fn write(fd: &FD, buf: &[u8]) -> std::io::Result<usize> {
-        let fd = fd.get().ok_or(std::io::Error::new(
-            ErrorKind::Other,
-            "write() called on closed socket",
-        ))?;
+    pub fn write(fd: &FD, buf: &[u8]) -> Result<usize> {
+        let fd = fd
+            .get()
+            .ok_or(std::io::Error::other("write() called on closed socket"))?;
         let rc = unsafe { libc::write(fd, buf.as_ptr() as *const c_void, buf.len()) };
         if rc < 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error().into());
         }
-        Ok(rc as usize)
+        usize::try_from(rc).map_err(Error::other)
     }
 }
 
@@ -193,13 +195,13 @@ impl NativeStream {
 
 impl Read for NativeStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        primitive::read(&self.fd, buf)
+        primitive::read(&self.fd, buf).map_err(std::io::Error::other)
     }
 }
 
 impl Write for NativeStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        primitive::write(&self.fd, buf)
+        primitive::write(&self.fd, buf).map_err(std::io::Error::other)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
