@@ -136,7 +136,7 @@ impl Packet {
                 let mut hops = Vec::new();
                 hops.push(via.len() as u8);
                 for call in via {
-                    hops.extend_from_slice(call.bytes());
+                    hops.extend_from_slice(call.as_bytes());
                 }
                 [h, hops.to_vec()].concat()
             }

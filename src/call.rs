@@ -1,16 +1,15 @@
 use anyhow::{Error, Result};
 
-/** Callsign, including SSID.
-
-Max length is 10, because that's the max length in the AGW
-protocol.
- */
+/// Callsign, including SSID.
+///
+/// Max length is 10, because that's the max length in the AGW protocol.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     bytes: [u8; 10],
 }
 
 impl Call {
+    /// Create callsign from ASCII bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Call> {
         if bytes.len() > 10 {
             return Err(Error::msg(format!(
@@ -33,9 +32,13 @@ impl Call {
         }
         Ok(Call { bytes: arr })
     }
-    pub fn bytes(&self) -> &[u8] {
+
+    /// Bytes of the callsign string.
+    pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Callsign as a string.
     pub fn string(&self) -> String {
         let mut s = String::new();
         for ch in self.bytes.iter() {
@@ -49,9 +52,9 @@ impl Call {
 
     /// Return true if the callsign is empty.
     ///
-    /// Sometimes this is the correct thing, for incoming/outgoing AGW
-    /// packets. E.g. querying the outgoing packet queue does not have
-    /// source nor destination.
+    /// Sometimes this is the correct thing, for incoming/outgoing AGW packets.
+    /// E.g. querying the outgoing packet queue does not have source nor
+    /// destination.
     pub fn is_empty(&self) -> bool {
         for b in self.bytes {
             if b != 0 {

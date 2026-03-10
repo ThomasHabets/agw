@@ -55,10 +55,10 @@ impl Header {
         v[6] = self.pid;
 
         if let Some(src) = &self.src {
-            v.splice(8..18, src.bytes().iter().cloned());
+            v.splice(8..18, src.as_bytes().iter().cloned());
         }
         if let Some(dst) = &self.dst {
-            v.splice(18..28, dst.bytes().iter().cloned());
+            v.splice(18..28, dst.as_bytes().iter().cloned());
         }
         v.splice(28..32, u32::to_le_bytes(self.data_len));
         v
