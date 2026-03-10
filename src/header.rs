@@ -50,7 +50,9 @@ impl Header {
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut v = vec![0; HEADER_LEN];
-        v[0] = self.port.0;
+        // Either the port parameter is not used (such as version or port info
+        // query), or it maps port 1 to byte 0, 2 to 1, etc.
+        v[0] = self.port.0.saturating_sub(1);
         v[4] = self.data_kind;
         v[6] = self.pid.0;
 
