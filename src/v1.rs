@@ -19,13 +19,44 @@ pub struct PortInfo {
     pub ports: Vec<String>,
 }
 
+/// Baud rate.
+///
+/// Normally 1200 or 9600 for classic AX.25.
+#[derive(Clone, Copy, Debug)]
+pub struct Baud(pub usize);
+
+/// Port capabilities.
+#[derive(Debug)]
+pub struct PortCaps {
+    /// On air baud rate.
+    pub rate: Baud,
+
+    /// Traffic level.
+    ///
+    /// `None` if port is not in autoupdate mode.
+    pub traffic_level: Option<u8>,
+
+    // TODO: get units on these.
+    pub tx_tail: u8,
+    pub tx_delay: u8,
+    pub persist: u8,
+    pub slot_time: u8,
+    pub max_frame: u8,
+
+    /// How Many connections are active on this port
+    pub active_connections: u8,
+    /// HowManyBytes (received in the last 2 minutes) as a 32 bits (4 bytes)
+    /// integer. Updated every two minutes.
+    pub bytes_per_2min: u32,
+}
+
 enum Reply {
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
     Version(u16, u16),                // R.
     CallsignRegistration(bool),       // X.
     PortInfo(PortInfo),               // G.
-    PortCaps(String),                 // g. TODO: parse
+    PortCaps(PortCaps),               // g.
     FramesOutstandingPort(u32),       // y.
     FramesOutstandingConnection(u32), // Y.
     HeardStations(String),            // H. TODO: parse
@@ -48,8 +79,8 @@ impl Reply {
             Reply::ConnectedSent(data) => format!("ConnectedSent: {:?}", data),
             Reply::Unproto(data) => format!("Received unproto: {:?}", data),
             Reply::PortInfo(s) => format!("Port info: {s:?}"),
-            Reply::PortCaps(s) => format!("Port caps: {}", s),
-            Reply::Connected(s) => format!("Connected: {}", s),
+            Reply::PortCaps(s) => format!("Port caps: {s:?}"),
+            Reply::Connected(s) => format!("Connected: {s}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::Raw(_data) => "Raw".to_string(),
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
@@ -113,17 +144,23 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             let bytes_per_2min =
                 u32::from_le_bytes(data[8..12].try_into().expect("can't happen: bytes to u32"));
 
-            Reply::PortCaps(format![
-                "rate={rate}
-  traffic={traffic_level}
-  txdelay={tx_delay}
-  txtail={tx_tail}
-  persist={persist}
-  slot_time={slot_time}
-  max_frame={max_frame}
-  active_connections={active_connections}
-  bytes_per_2min={bytes_per_2min}"
-            ])
+            let traffic_level = if traffic_level == 0xff {
+                None
+            } else {
+                Some(traffic_level)
+            };
+
+            Reply::PortCaps(PortCaps {
+                rate: Baud(rate.into()),
+                traffic_level,
+                tx_delay,
+                tx_tail,
+                slot_time,
+                max_frame,
+                active_connections,
+                bytes_per_2min,
+                persist,
+            })
         }
         b'y' => Reply::FramesOutstandingPort(u32::from_le_bytes(
             data[0..4].try_into().expect("can't happen: bytes to u32"),
@@ -405,7 +442,7 @@ impl AGW {
     }
 
     /// Get port capabilities of the AGW "port".
-    pub fn port_cap(&mut self, port: Port) -> Result<String> {
+    pub fn port_cap(&mut self, port: Port) -> Result<PortCaps> {
         self.send(&Packet::PortCapQuery(port).serialize())?;
         loop {
             let (h, r) = self.rx.recv()?;

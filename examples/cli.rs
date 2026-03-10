@@ -68,7 +68,10 @@ fn main() -> Result<()> {
                 println!("  {port}");
             }
         }
-        Command::PortCap { port } => eprintln!("{}", agw.port_cap(port)?),
+        Command::PortCap { port } => {
+            let cap = agw.port_cap(port)?;
+            println!("{cap:?}");
+        }
         Command::Unproto { src, dst, msg } => {
             let pid = agw::Pid(0xF0); // TODO: make a flag.
             let port = agw::Port(0); // TODO
