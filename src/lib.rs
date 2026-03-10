@@ -1,4 +1,7 @@
-//#![allow(clippy::doc_markdown)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::linkedlist)]
 #![doc = include_str!("../README.md")]
 mod call;
 mod header;

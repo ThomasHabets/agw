@@ -106,7 +106,7 @@ impl Router {
         *rules = rules
             .iter()
             .filter(|&r| r.ident != ident)
-            .map(|r| r.to_owned())
+            .map(std::borrow::ToOwned::to_owned)
             .collect();
     }
     pub async fn process(&self, packet: Packet) -> Result<bool> {
@@ -114,7 +114,7 @@ impl Router {
         // TODO: not very efficient, but it avoids holding the lock
         // cross await.
         let rules = self.rules.lock().unwrap().clone();
-        for rule in rules.iter() {
+        for rule in &rules {
             if rule.m.matches(&packet) {
                 rule.tx.send(packet.clone()).await.map_err(Error::other)?;
                 any = true;
@@ -145,7 +145,7 @@ enum PIPOState {
 }
 
 impl Pipo {
-    async fn new(con: TcpStream, router: Arc<Router>) -> Self {
+    fn new(con: TcpStream, router: Arc<Router>) -> Self {
         //let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
         let (tx2, rx2) = mpsc::channel(10); // TODO: magic number.
         tokio::spawn(async move {
@@ -229,7 +229,7 @@ impl AGW {
         let router = Arc::new(Router::new());
         let r2 = router.clone();
         Ok(Self {
-            con: Pipo::new(TcpStream::connect(addr).await?, r2).await,
+            con: Pipo::new(TcpStream::connect(addr).await?, r2),
             router,
         })
     }
@@ -246,6 +246,10 @@ impl AGW {
             self.con.recv().await
     }
         */
+
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub async fn connect<'a>(
         &'a self,
         port: Port,

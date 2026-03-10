@@ -14,6 +14,11 @@ pub struct Proxy {
 }
 
 impl Proxy {
+    /// Set up a new proxy.
+    ///
+    /// # Errors
+    ///
+    /// If failing to connect to upstream.
     pub fn new(down: TcpStream) -> Result<Self> {
         let addr = "127.0.0.1:8010";
         let up = TcpStream::connect(addr)?;

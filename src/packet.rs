@@ -165,7 +165,7 @@ impl Packet {
                 for call in via {
                     hops.extend_from_slice(call.as_bytes());
                 }
-                [h, hops.to_vec()].concat()
+                [h, hops.clone()].concat()
             }
             Packet::RegisterCallsign(port, pid, src) => {
                 Header::new(*port, b'X', *pid, Some(src.clone()), None, 0).serialize()
@@ -210,10 +210,10 @@ impl Packet {
                     *pid,
                     Some(src.clone()),
                     Some(dst.clone()),
-                    data.len() as u32,
+                    u32::try_from(data.len()).expect("TODO: return err or something"),
                 )
                 .serialize(),
-                data.to_vec(),
+                data.clone(),
             ]
             .concat(),
             Packet::PortInfoQuery => Header::new(Port(0), b'G', Pid(0), None, None, 0).serialize(),
@@ -232,11 +232,13 @@ impl Packet {
                     )));
                 }
 
+                #[allow(clippy::missing_panics_doc)]
                 let major = u16::from_le_bytes(
                     data[0..2]
                         .try_into()
                         .expect("can't happen: two bytes can't be made into u16?"),
                 );
+                #[allow(clippy::missing_panics_doc)]
                 let minor = u16::from_le_bytes(
                     data[4..6]
                         .try_into()

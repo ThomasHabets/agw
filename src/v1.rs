@@ -131,7 +131,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                     .next()
                     .expect("TODO: custom error")
                     .split(';')
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .filter(|s| s != "\0")
                     .collect();
                 (count, ports)
@@ -195,13 +195,17 @@ pub struct MakeWriter {
 }
 impl MakeWriter {
     /// Make the bytes of an AGW packet to send a packet of data.
-    pub fn data(&self, data: &[u8]) -> Result<Vec<u8>> {
+    ///
+    /// # Errors
+    ///
+    /// If given data so bad that the serialization fails.
+    pub fn data<T: Into<Vec<u8>>>(&self, data: T) -> Result<Vec<u8>> {
         Ok(Packet::Data {
             port: self.port,
             pid: self.pid,
             src: self.src.clone(),
             dst: self.dst.clone(),
-            data: data.to_vec(),
+            data: data.into(),
         }
         .serialize())
     }
@@ -252,16 +256,25 @@ impl<'a> Connection<'a> {
     }
 
     /// Return the connect string.
+    #[must_use]
     pub fn connect_string(&self) -> &str {
         &self.connect_string
     }
 
     /// Read user data from the connection.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn read(&mut self) -> Result<Vec<u8>> {
         self.agw.read_connected(&self.src, &self.dst)
     }
 
     /// Write data to the connection.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn write(&mut self, data: &[u8]) -> Result<usize> {
         self.agw
             .write_connected(self.port, self.pid, &self.src, &self.dst, data)
@@ -269,6 +282,7 @@ impl<'a> Connection<'a> {
 
     /// Create MakeWriter object, in order to create AGW packets
     /// without holding on to a connection.
+    #[must_use]
     pub fn make_writer(&self) -> MakeWriter {
         MakeWriter {
             port: self.port,
@@ -286,6 +300,10 @@ impl<'a> Connection<'a> {
     }
 
     /// Disconnect the connection.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
             debug!("disconnecting");
@@ -307,11 +325,17 @@ impl<'a> Connection<'a> {
 impl Drop for Connection<'_> {
     fn drop(&mut self) {
         if let Err(e) = self.disconnect() {
-            warn!("drop-disconnection errored with {:?}", e);
+            warn!("drop-disconnection errored with {e:?}");
         }
     }
 }
 
+/// Parse header from bytes.
+///
+/// # Errors
+///
+/// If the header is invalid.
+#[allow(clippy::missing_panics_doc)]
 pub fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
     let src = Call::from_bytes(&header[8..18])?;
     let src = if src.is_empty() { None } else { Some(src) };
@@ -351,6 +375,10 @@ pub struct AGW {
 
 impl AGW {
     /// Create AGW connection to ip:port.
+    ///
+    /// # Errors
+    ///
+    /// If connecting to the server fails.
     pub fn new(addr: &str) -> Result<AGW> {
         debug!("Creating AGW to {addr}");
         let (tx, rx) = mpsc::channel();
@@ -364,15 +392,17 @@ impl AGW {
         };
         // Start reader.
         std::thread::spawn(|| {
-            if let Err(e) = Self::reader(rstream, tx) {
-                warn!("TCP socket reader connected to AGWPE ended: {:?}", e);
+            if let Err(e) = Self::reader(rstream, &tx) {
+                warn!("TCP socket reader connected to AGWPE ended: {e:?}");
             }
+            drop(tx);
         });
         // Start writer.
         std::thread::spawn(|| {
-            if let Err(e) = Self::writer(wstream, rx2) {
-                warn!("TCP socket writer connected to AGWPE ended: {:?}", e);
+            if let Err(e) = Self::writer(wstream, &rx2) {
+                warn!("TCP socket writer connected to AGWPE ended: {e:?}");
             }
+            drop(rx2);
         });
         Ok(agw)
     }
@@ -386,7 +416,7 @@ impl AGW {
         self.tx.clone()
     }
 
-    fn writer(mut stream: TcpStream, rx: mpsc::Receiver<Vec<u8>>) -> Result<()> {
+    fn writer(mut stream: TcpStream, rx: &mpsc::Receiver<Vec<u8>>) -> Result<()> {
         loop {
             let buf = rx.recv().map_err(Error::other)?;
             // TODO: do full write.
@@ -394,7 +424,7 @@ impl AGW {
         }
     }
 
-    fn reader(mut stream: TcpStream, tx: mpsc::Sender<(Header, Reply)>) -> Result<()> {
+    fn reader(mut stream: TcpStream, tx: &mpsc::Sender<(Header, Reply)>) -> Result<()> {
         loop {
             let mut header = [0_u8; HEADER_LEN];
             stream.read_exact(&mut header)?;
@@ -417,8 +447,9 @@ impl AGW {
     }
 
     fn rx_enqueue(&mut self, h: Header, r: Reply) {
-        self.rxqueue.push_back((h, r));
         const WARN_LIMIT: usize = 10;
+
+        self.rxqueue.push_back((h, r));
         let l = self.rxqueue.len();
         if l > WARN_LIMIT {
             warn!("AGW maxqueue length {l} > {WARN_LIMIT}");
@@ -426,6 +457,10 @@ impl AGW {
     }
 
     /// Get the version of the AGW endpoint.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn version(&mut self) -> Result<(u16, u16)> {
         self.send(&Packet::VersionQuery.serialize())?;
         loop {
@@ -438,6 +473,10 @@ impl AGW {
     }
 
     /// Get some port info for the AGW endpoint.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn port_info(&mut self) -> Result<PortInfo> {
         self.send(&Packet::PortInfoQuery.serialize())?;
         loop {
@@ -450,6 +489,10 @@ impl AGW {
     }
 
     /// Get port capabilities of the AGW "port".
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn port_cap(&mut self, port: Port) -> Result<PortCaps> {
         self.send(&Packet::PortCapQuery(port).serialize())
             .map_err(Error::other)?;
@@ -463,6 +506,10 @@ impl AGW {
     }
 
     /// Send UI packet.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn unproto(
         &mut self,
         port: Port,
@@ -502,6 +549,10 @@ impl AGW {
     }
 
     /// Create a new connection.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
     pub fn connect<'a>(
         &'a mut self,
         port: Port,

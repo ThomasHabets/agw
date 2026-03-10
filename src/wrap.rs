@@ -2,8 +2,20 @@ use std::io::{Read, Write};
 
 use crate::Result;
 
+/// An interface to wrap data, e.g. for signed packet sending.
 pub trait Wrapper {
+    /// Wrap a value.
+    ///
+    /// # Errors
+    ///
+    /// Implementation defined.
     fn wrap(&self, input: &[u8]) -> Result<Vec<u8>>;
+    /// Wrap a value.
+    ///
+    /// # Errors
+    ///
+    /// Implementation defined. But in the case of signed, if the signature
+    /// doesn't match.
     fn unwrap(&self, input: &[u8]) -> Result<Vec<u8>>;
 }
 
@@ -28,7 +40,7 @@ impl<T: Read + Write, W: Wrapper> Read for Wrap<T, W> {
         let msg = self
             .wrapper
             .wrap(buf2)
-            .map_err(|e| std::io::Error::other(format!("{}", e)))?;
+            .map_err(|e| std::io::Error::other(format!("{e}")))?;
         let msglen = msg.len();
         buf.copy_from_slice(&msg);
         Ok(msglen)
