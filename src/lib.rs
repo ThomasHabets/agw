@@ -1,9 +1,6 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
-#![allow(clippy::ptr_as_ptr)]
-#![allow(clippy::borrow_as_ptr)]
-#![allow(clippy::ref_as_ptr)]
 #![allow(clippy::linkedlist)]
 #![doc = include_str!("../README.md")]
 mod call;

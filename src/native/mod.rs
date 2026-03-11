@@ -109,7 +109,7 @@ mod primitive {
 
     pub fn bind(fd: &FD, mycall: &BinaryCall, digis: &[BinaryCall]) -> Result<()> {
         let sa = make_sa(mycall, digis)?;
-        let sa_ptr = &sa as *const _ as *const libc::sockaddr;
+        let sa_ptr = (&raw const sa).cast::<libc::sockaddr>();
         let rc = unsafe {
             libc::bind(
                 fd.get().ok_or(std::io::Error::last_os_error())?,
@@ -140,7 +140,7 @@ mod primitive {
         */
     pub fn connect(fd: &FD, call: &BinaryCall, digis: &[BinaryCall]) -> Result<()> {
         let sa = make_sa(call, digis)?;
-        let sa_ptr = &sa as *const _ as *const libc::sockaddr;
+        let sa_ptr = (&raw const sa).cast::<libc::sockaddr>();
         if -1
             == unsafe {
                 libc::connect(
@@ -161,7 +161,7 @@ mod primitive {
         let fd = fd
             .get()
             .ok_or(std::io::Error::other("read() called on closed socket"))?;
-        let rc = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+        let rc = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<c_void>(), buf.len()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -171,7 +171,7 @@ mod primitive {
         let fd = fd
             .get()
             .ok_or(std::io::Error::other("write() called on closed socket"))?;
-        let rc = unsafe { libc::write(fd, buf.as_ptr() as *const c_void, buf.len()) };
+        let rc = unsafe { libc::write(fd, buf.as_ptr().cast::<c_void>(), buf.len()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
