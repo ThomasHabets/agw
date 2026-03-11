@@ -171,7 +171,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             })
         }
         b'y' => Reply::FramesOutstandingPort(
-            Port(1),
+            Port(header.port.0 + 1),
             usize::try_from(u32::from_le_bytes(
                 data[0..4].try_into().expect("can't happen: bytes to u32"),
             ))
