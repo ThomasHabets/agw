@@ -19,7 +19,7 @@ jobs:
     - name: Install dependencies
       run:  sudo apt-get install -y libsodium-dev libax25
     - name: Install nightly
-      run: ristup install nightly
+      run: rustup install nightly
     - name: Rustup install nightly clippy
       run: rustup component add --toolchain nightly clippy
     - name: Cargo install
