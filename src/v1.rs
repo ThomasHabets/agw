@@ -58,7 +58,7 @@ enum Reply {
     Version(u16, u16),                  // R.
     CallsignRegistration(bool),         // X.
     PortInfo(PortInfo),                 // G.
-    PortCaps(PortCaps),                 // g.
+    PortCaps(Port, PortCaps),           // g.
     FramesOutstandingPort(Port, usize), // y.
     FramesOutstandingConnection(u32),   // Y.
     HeardStations(String),              // H. TODO: parse
@@ -81,7 +81,7 @@ impl Reply {
             Reply::ConnectedSent(data) => format!("ConnectedSent: {data:?}"),
             Reply::Unproto(data) => format!("Received unproto: {data:?}"),
             Reply::PortInfo(s) => format!("Port info: {s:?}"),
-            Reply::PortCaps(s) => format!("Port caps: {s:?}"),
+            Reply::PortCaps(port, s) => format!("Port caps for port {port:?}: {s:?}"),
             Reply::Connected(s) => format!("Connected: {s}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::Raw(_data) => "Raw".to_string(),
@@ -158,17 +158,20 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 Some(traffic_level)
             };
 
-            Reply::PortCaps(PortCaps {
-                rate: Baud(rate.into()),
-                traffic_level,
-                tx_delay,
-                tx_tail,
-                slot_time,
-                max_frame,
-                active_connections,
-                bytes_per_2min,
-                persist,
-            })
+            Reply::PortCaps(
+                Port(header.port.0 + 1),
+                PortCaps {
+                    rate: Baud(rate.into()),
+                    traffic_level,
+                    tx_delay,
+                    tx_tail,
+                    slot_time,
+                    max_frame,
+                    active_connections,
+                    bytes_per_2min,
+                    persist,
+                },
+            )
         }
         b'y' => Reply::FramesOutstandingPort(
             Port(header.port.0 + 1),
@@ -517,7 +520,7 @@ impl AGW {
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
-                Reply::PortCaps(i) => return Ok(i),
+                Reply::PortCaps(p, i) if p == port => return Ok(i),
                 other => self.rx_enqueue(h, other),
             }
         }
