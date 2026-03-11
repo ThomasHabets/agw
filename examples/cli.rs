@@ -19,6 +19,10 @@ enum Command {
         dst: String,
     },
     Version {},
+    FramesOutstandingPort {
+        #[arg(value_parser = parse_port)]
+        port: Port,
+    },
     PortInfo,
     PortCap {
         #[arg(value_parser = parse_port)]
@@ -70,6 +74,10 @@ fn main() -> Result<()> {
         }
         Command::PortCap { port } => {
             let cap = agw.port_cap(port)?;
+            println!("{cap:?}");
+        }
+        Command::FramesOutstandingPort { port } => {
+            let cap = agw.frames_outstanding(port)?;
             println!("{cap:?}");
         }
         Command::Unproto { src, dst, msg } => {

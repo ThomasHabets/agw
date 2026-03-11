@@ -55,21 +55,21 @@ pub struct PortCaps {
 enum Reply {
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
-    Version(u16, u16),                // R.
-    CallsignRegistration(bool),       // X.
-    PortInfo(PortInfo),               // G.
-    PortCaps(PortCaps),               // g.
-    FramesOutstandingPort(u32),       // y.
-    FramesOutstandingConnection(u32), // Y.
-    HeardStations(String),            // H. TODO: parse
-    Connected(String),                // C.
-    ConnectedData(Vec<u8>),           // D.
-    Disconnect,                       // d.
-    MonitorConnected(Vec<u8>),        // I.
-    MonitorSupervisory(Vec<u8>),      // S.
-    Unproto(Vec<u8>),                 // U.
-    ConnectedSent(Vec<u8>),           // T.
-    Raw(Vec<u8>),                     // R.
+    Version(u16, u16),                  // R.
+    CallsignRegistration(bool),         // X.
+    PortInfo(PortInfo),                 // G.
+    PortCaps(PortCaps),                 // g.
+    FramesOutstandingPort(Port, usize), // y.
+    FramesOutstandingConnection(u32),   // Y.
+    HeardStations(String),              // H. TODO: parse
+    Connected(String),                  // C.
+    ConnectedData(Vec<u8>),             // D.
+    Disconnect,                         // d.
+    MonitorConnected(Vec<u8>),          // I.
+    MonitorSupervisory(Vec<u8>),        // S.
+    Unproto(Vec<u8>),                   // U.
+    ConnectedSent(Vec<u8>),             // T.
+    Raw(Vec<u8>),                       // R.
     Unknown(Header, Vec<u8>),
 }
 
@@ -86,7 +86,9 @@ impl Reply {
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::Raw(_data) => "Raw".to_string(),
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
-            Reply::FramesOutstandingPort(n) => format!("Frames outstanding port: {n}"),
+            Reply::FramesOutstandingPort(port, n) => {
+                format!("Frames outstanding port {port:?}: {n}")
+            }
             Reply::FramesOutstandingConnection(n) => format!("Frames outstanding connection: {n}"),
             Reply::MonitorConnected(x) => format!("Connected packet len {}", x.len()),
             Reply::MonitorSupervisory(x) => format!("Supervisory packet len {}", x.len()),
@@ -168,9 +170,13 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 persist,
             })
         }
-        b'y' => Reply::FramesOutstandingPort(u32::from_le_bytes(
-            data[0..4].try_into().expect("can't happen: bytes to u32"),
-        )),
+        b'y' => Reply::FramesOutstandingPort(
+            Port(1),
+            usize::try_from(u32::from_le_bytes(
+                data[0..4].try_into().expect("can't happen: bytes to u32"),
+            ))
+            .expect("TODO: some error"),
+        ),
         b'Y' => Reply::FramesOutstandingConnection(u32::from_le_bytes(
             data[0..4].try_into().expect("can't happen: bytes to u32"),
         )),
@@ -467,6 +473,18 @@ impl AGW {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::Version(maj, min) => return Ok((maj, min)),
+                other => self.rx_enqueue(h, other),
+            }
+        }
+    }
+
+    /// Get the number of outstanding frames on a port.
+    pub fn frames_outstanding(&mut self, port: Port) -> Result<usize> {
+        self.send(&Packet::FramesOutstandingPortQuery(port).serialize())?;
+        loop {
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
+            match r {
+                Reply::FramesOutstandingPort(p, n) if p == port => return Ok(n),
                 other => self.rx_enqueue(h, other),
             }
         }

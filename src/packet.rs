@@ -19,6 +19,12 @@ pub enum Packet {
     /// Application: Version query.
     VersionQuery,
 
+    /// Application: Ask outstanding frames.
+    FramesOutstandingPortQuery(Port),
+
+    /// AGWPE: Outstanding frame count report.
+    FramesOutstandingPortReply(Port, usize),
+
     /// AGWPE: Version reply.
     VersionReply {
         major: u16,
@@ -76,7 +82,6 @@ pub enum Packet {
         dst: Call,
         data: Vec<u8>,
     },
-    // FramesOutstandingPort(u32), // y
     // FramesOutstandingConnection(u32), // Y
     // HeardStations(String) // H
     // MonitorConnected(Vec<u8>) // I
@@ -93,6 +98,17 @@ impl Packet {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Packet::VersionQuery => Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
+            Packet::FramesOutstandingPortQuery(port) => {
+                Header::new(*port, b'y', Pid(0), None, None, 0).serialize()
+            }
+            Packet::FramesOutstandingPortReply(port, n) => [
+                Header::new(*port, b'y', Pid(0), None, None, 4).serialize(),
+                u32::try_from(*n)
+                    .expect("can't happen. Has to fit")
+                    .to_le_bytes()
+                    .to_vec(),
+            ]
+            .concat(),
             Packet::VersionReply { major, minor } => {
                 let data = vec![
                     u8::try_from(*major & 0xff).expect("can't happen"),
