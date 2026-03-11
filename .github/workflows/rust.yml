@@ -27,4 +27,4 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run tests
-      run: CLEANUP=true tickbox --dir tickbox/pre-commit --disable-tui
+      run: CLEANUP=true tickbox --dir tickbox/precommit --disable-tui
