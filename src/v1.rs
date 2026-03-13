@@ -10,14 +10,21 @@ use crate::{Error, Result};
 
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
-/// Port information.
+/// Info about one port.
 #[derive(Debug)]
 pub struct PortInfo {
+    pub port: Port,
+    pub descr: String,
+}
+
+/// Info about all ports.
+#[derive(Debug)]
+pub struct PortsInfo {
     /// Number of ports.
     pub count: usize,
 
     /// Description of ports.
-    pub ports: Vec<String>,
+    pub ports: Vec<PortInfo>,
 }
 
 /// Baud rate.
@@ -81,7 +88,7 @@ enum Reply {
     // too, when appropriate?
     Version(u16, u16),                       // R.
     CallsignRegistration(bool),              // X.
-    PortInfo(PortInfo),                      // G.
+    PortInfo(PortsInfo),                     // G.
     PortCaps(Port, PortCaps),                // g.
     FramesOutstandingPort(Port, usize),      // y.
     FramesOutstandingConnection(u32),        // Y.
@@ -122,6 +129,7 @@ impl Reply {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     // TODO: confirm data len, since most replies will have fixed size.
     Ok(match header.data_kind {
@@ -145,6 +153,8 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'T' => Reply::ConnectedSent(data.to_vec()),
         b'U' => Reply::Unproto(data.to_vec()),
         b'G' => {
+            let re = regex::Regex::new(r"^Port(\d+)\s*(.*)$").unwrap();
+
             let s = std::str::from_utf8(data).map_err(Error::other)?;
             let (count, ports) = {
                 let mut np = s.splitn(2, ';');
@@ -159,10 +169,29 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                     .split(';')
                     .map(std::string::ToString::to_string)
                     .filter(|s| s != "\0")
-                    .collect();
+                    .map(|s| {
+                        let caps = re
+                            .captures(&s)
+                            .ok_or(Error::msg(format!("bad port line {s:?}")))?;
+                        let port = Port(
+                            caps.get(1)
+                                .ok_or(Error::msg("Can't happen: port number missing"))?
+                                .as_str()
+                                .parse()
+                                .ok()
+                                .ok_or(Error::msg("Port number not a number"))?,
+                        );
+                        let descr = caps
+                            .get(2)
+                            .ok_or(Error::msg("Can't happen: descr string missing"))?
+                            .as_str()
+                            .to_string();
+                        Ok::<_, Error>(PortInfo { port, descr })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 (count, ports)
             };
-            Reply::PortInfo(PortInfo { count, ports })
+            Reply::PortInfo(PortsInfo { count, ports })
         }
         b'g' => {
             let rate = data[0];
@@ -526,7 +555,7 @@ impl AGW {
     /// # Errors
     ///
     /// If the underlying connection fails.
-    pub fn port_info(&mut self) -> Result<PortInfo> {
+    pub fn port_info(&mut self) -> Result<PortsInfo> {
         self.send(&Packet::PortInfoQuery.serialize())?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;

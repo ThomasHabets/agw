@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             let info = agw.port_info()?;
             println!("Port count: {}", info.count);
             for port in info.ports {
-                println!("  {port}");
+                println!("  {port:?}");
             }
         }
         Command::PortCap { port } => {
