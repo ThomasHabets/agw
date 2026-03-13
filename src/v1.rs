@@ -70,24 +70,30 @@ pub struct PortCaps {
     pub bytes_per_2min: u32,
 }
 
+#[derive(Debug)]
+pub struct CallsignHeard {
+    pub call: Call,
+    // TODO: timestamps.
+}
+
 enum Reply {
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
-    Version(u16, u16),                  // R.
-    CallsignRegistration(bool),         // X.
-    PortInfo(PortInfo),                 // G.
-    PortCaps(Port, PortCaps),           // g.
-    FramesOutstandingPort(Port, usize), // y.
-    FramesOutstandingConnection(u32),   // Y.
-    HeardStations(String),              // H. TODO: parse
-    Connected(String),                  // C.
-    ConnectedData(Vec<u8>),             // D.
-    Disconnect,                         // d.
-    MonitorConnected(Vec<u8>),          // I.
-    MonitorSupervisory(Vec<u8>),        // S.
-    Unproto(Vec<u8>),                   // U.
-    ConnectedSent(Vec<u8>),             // T.
-    Raw(Vec<u8>),                       // R.
+    Version(u16, u16),                       // R.
+    CallsignRegistration(bool),              // X.
+    PortInfo(PortInfo),                      // G.
+    PortCaps(Port, PortCaps),                // g.
+    FramesOutstandingPort(Port, usize),      // y.
+    FramesOutstandingConnection(u32),        // Y.
+    CallsignHeard(Port, Vec<CallsignHeard>), // H.
+    Connected(String),                       // C.
+    ConnectedData(Vec<u8>),                  // D.
+    Disconnect,                              // d.
+    MonitorConnected(Vec<u8>),               // I.
+    MonitorSupervisory(Vec<u8>),             // S.
+    Unproto(Vec<u8>),                        // U.
+    ConnectedSent(Vec<u8>),                  // T.
+    Raw(Vec<u8>),                            // R.
     Unknown(Header, Vec<u8>),
 }
 
@@ -102,6 +108,7 @@ impl Reply {
             Reply::PortCaps(port, s) => format!("Port caps for port {port:?}: {s:?}"),
             Reply::Connected(s) => format!("Connected: {s}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
+            Reply::CallsignHeard(port, c) => format!("Heard on {port:?}: {c:?}"),
             Reply::Raw(_data) => "Raw".to_string(),
             Reply::CallsignRegistration(success) => format!("Callsign registration: {success}"),
             Reply::FramesOutstandingPort(port, n) => {
@@ -110,7 +117,6 @@ impl Reply {
             Reply::FramesOutstandingConnection(n) => format!("Frames outstanding connection: {n}"),
             Reply::MonitorConnected(x) => format!("Connected packet len {}", x.len()),
             Reply::MonitorSupervisory(x) => format!("Supervisory packet len {}", x.len()),
-            Reply::HeardStations(s) => format!("Heard stations: {s}"),
             Reply::Unknown(h, data) => format!("Unknown reply: header={h:?} data={data:?}"),
         }
     }
@@ -201,7 +207,11 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'Y' => Reply::FramesOutstandingConnection(u32::from_le_bytes(
             data[0..4].try_into().expect("can't happen: bytes to u32"),
         )),
-        b'H' => Reply::HeardStations(std::str::from_utf8(data).map_err(Error::other)?.to_string()),
+        b'H' => Reply::CallsignHeard(
+            Port(header.port.0 + 1),
+            // TODO: implement parse.
+            vec![],
+        ),
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
         b'K' => Reply::Raw(data.to_vec()),
@@ -539,6 +549,22 @@ impl AGW {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
                 Reply::PortCaps(p, i) if p == port => return Ok(i),
+                other => self.rx_enqueue(h, other),
+            }
+        }
+    }
+
+    /// Get callsigns heard.
+    // TODO: this is probably broken. The spec says up to 20 frames can be
+    // received? Ending with empty callsign one? Direwolf isn't sending me
+    // anything.
+    pub fn callsign_heard(&mut self, port: Port) -> Result<Vec<CallsignHeard>> {
+        self.send(&Packet::CallsignHeardQuery(port).serialize())
+            .map_err(Error::other)?;
+        loop {
+            let (h, r) = self.rx.recv().map_err(Error::other)?;
+            match r {
+                Reply::CallsignHeard(p, i) if p == port => return Ok(i),
                 other => self.rx_enqueue(h, other),
             }
         }

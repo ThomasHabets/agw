@@ -28,6 +28,10 @@ enum Command {
         #[arg(value_parser = parse_port)]
         port: Port,
     },
+    CallsignHeard {
+        #[arg(value_parser = parse_port)]
+        port: Port,
+    },
     Unproto {
         src: String,
         dst: String,
@@ -75,6 +79,10 @@ fn main() -> Result<()> {
         Command::PortCap { port } => {
             let cap = agw.port_cap(port)?;
             println!("{cap:?}");
+        }
+        Command::CallsignHeard { port } => {
+            let h = agw.callsign_heard(port)?;
+            println!("{h:?}");
         }
         Command::FramesOutstandingPort { port } => {
             let cap = agw.frames_outstanding(port)?;

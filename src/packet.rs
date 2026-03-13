@@ -34,6 +34,9 @@ pub enum Packet {
     /// Application: Port capability query.
     PortCapQuery(Port),
 
+    /// Application: List heard callsigns.
+    CallsignHeardQuery(Port),
+
     /// Application: Port info query.
     PortInfoQuery,
     RegisterCallsign(Port, Pid, Call),
@@ -233,6 +236,9 @@ impl Packet {
             ]
             .concat(),
             Packet::PortInfoQuery => Header::new(Port(0), b'G', Pid(0), None, None, 0).serialize(),
+            Packet::CallsignHeardQuery(port) => {
+                Header::new(*port, b'H', Pid(0), None, None, 0).serialize()
+            }
             Packet::PortCapQuery(port) => {
                 Header::new(*port, b'g', Pid(0), None, None, 0).serialize()
             }
