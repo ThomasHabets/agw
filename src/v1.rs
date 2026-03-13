@@ -24,7 +24,25 @@ pub struct PortInfo {
 ///
 /// Normally 1200 or 9600 for classic AX.25.
 #[derive(Clone, Copy, Debug)]
-pub struct Baud(pub usize);
+pub enum Baud {
+    Unknown,
+    B1200,
+    B2400,
+    B4800,
+    B9600,
+}
+
+impl Baud {
+    fn from_byte(b: u8) -> Option<Baud> {
+        Some(match b {
+            0 => Baud::B1200,
+            1 => Baud::B2400,
+            2 => Baud::B4800,
+            3 => Baud::B9600,
+            _ => return None,
+        })
+    }
+}
 
 /// Port capabilities.
 #[derive(Debug)]
@@ -161,7 +179,7 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             Reply::PortCaps(
                 Port(header.port.0 + 1),
                 PortCaps {
-                    rate: Baud(rate.into()),
+                    rate: Baud::from_byte(rate).unwrap_or(Baud::Unknown),
                     traffic_level,
                     tx_delay,
                     tx_tail,
