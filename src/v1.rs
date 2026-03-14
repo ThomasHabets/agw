@@ -572,6 +572,10 @@ impl AGW {
     ///
     /// If the underlying connection fails.
     pub fn port_cap(&mut self, port: Port) -> Result<PortCaps> {
+        let ports = self.port_info()?;
+        if !ports.ports.iter().any(|p| p.port == port) {
+            return Err(Error::msg(format!("No such port as {port:?}")));
+        }
         self.send(&Packet::PortCapQuery(port).serialize())
             .map_err(Error::other)?;
         loop {
