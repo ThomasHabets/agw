@@ -39,7 +39,7 @@ struct AgwCon {
 }
 
 impl AgwCon {
-    fn run<R: Read + Send, W: Write + Send>(&self, r: R, w: W) {
+    fn run<R: Poll + Read + Send, W: Write + Send>(&self, r: R, w: W) {
         std::thread::scope(|s| {
             let jhr = s.spawn(move || {
                 self.reader(r);
@@ -95,9 +95,9 @@ impl AgwCon {
             txq.drain(..n);
         }
     }
-    fn reader(&self, r: impl Read) {
+    fn reader(&self, r: impl Read + Poll) {
         match self.reader_inner(r) {
-            Ok(()) => {} // TODO: send EOF to all children.
+            Ok(()) => {} // TODO: send EOF to all children?
             Err(e) => {
                 eprintln!("Reader error: {e}");
                 let children = self.children.lock().unwrap();
@@ -111,13 +111,15 @@ impl AgwCon {
             }
         }
     }
-    // TODO: require `r` to also implement some sort of poller that works with
-    // polling for the signal to stop.
-    fn reader_inner(&self, mut r: impl Read) -> Result<()> {
+    fn reader_inner(&self, mut r: impl Read + Poll) -> Result<()> {
         let mut header = [0_u8; HEADER_LEN];
         loop {
+            // Poll for ready or done.
+            // TODO: actually poll some pipe.
+            if let PollResult::Other = r.poll(-1)? {
+                return Ok(());
+            }
             // Read header.
-            // TODO: read with timeout.
             match r.read_exact(&mut header) {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
                 other => other,
@@ -192,6 +194,57 @@ impl Read for Connection {
     }
 }
 
+pub enum PollResult {
+    This,
+    Other,
+}
+
+pub trait Poll {
+    fn poll(&self, other: libc::c_int) -> Result<PollResult>;
+}
+//impl Poll for std::net::TcpStream {
+impl<T: std::os::fd::AsFd> Poll for T {
+    fn poll(&self, other: libc::c_int) -> Result<PollResult> {
+        use std::os::fd::AsRawFd;
+        let fd = self.as_fd().as_raw_fd();
+        loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: other,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+            if rc < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if rc == 0 {
+                continue;
+            }
+            if rc == 2 {
+                // Detault to saying other one is ready.
+                return Ok(PollResult::Other);
+            }
+            if rc == 1 {
+                if fds[0].revents & libc::POLLIN != 0 {
+                    return Ok(PollResult::This);
+                }
+                if fds[1].revents & libc::POLLIN != 0 {
+                    return Ok(PollResult::Other);
+                }
+                panic!("Can't happen: poll() returned 1, but nothing ready");
+            }
+            panic!("Can't happen: poll() returned {rc}");
+        }
+    }
+}
+
 impl AGW {
     /// Create AGW connection to ip:port.
     //
@@ -206,7 +259,7 @@ impl AGW {
     pub fn shut(&self) {
         self.parent.shut();
     }
-    pub fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
+    pub fn run<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
         &self,
         r: R,
         w: W,
