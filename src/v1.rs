@@ -11,14 +11,14 @@ use crate::{Error, Result};
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
 /// Info about one port.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PortInfo {
     pub port: Port,
     pub descr: String,
 }
 
 /// Info about all ports.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PortsInfo {
     /// Number of ports.
     pub count: usize,
@@ -52,7 +52,7 @@ impl Baud {
 }
 
 /// Port capabilities.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PortCaps {
     /// On air baud rate.
     pub rate: Baud,
@@ -77,13 +77,34 @@ pub struct PortCaps {
     pub bytes_per_2min: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallsignHeard {
     pub call: Call,
     // TODO: timestamps.
 }
 
-enum Reply {
+#[derive(Debug, Clone)]
+pub(crate) struct ConnectedData {
+    pub port: Port,
+    pub pid: Pid,
+    pub src: Call,
+    pub dst: Call,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Connected {
+    pub port: Port,
+    pub pid: Pid,
+    pub src: Call,
+    pub dst: Call,
+    pub data: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Reply {
+    Error(Error),
+
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
     Version(u16, u16),                       // R.
@@ -93,8 +114,8 @@ enum Reply {
     FramesOutstandingPort(Port, usize),      // y.
     FramesOutstandingConnection(u32),        // Y.
     CallsignHeard(Port, Vec<CallsignHeard>), // H.
-    Connected(String),                       // C.
-    ConnectedData(Vec<u8>),                  // D.
+    ConnectionEstablished(Connected),        // C.
+    ConnectedData(ConnectedData),            // D.
     Disconnect,                              // d.
     MonitorConnected(Vec<u8>),               // I.
     MonitorSupervisory(Vec<u8>),             // S.
@@ -107,13 +128,14 @@ enum Reply {
 impl Reply {
     fn description(&self) -> String {
         match self {
+            Reply::Error(e) => format!("Error: {e}"),
             Reply::Disconnect => "Disconnect".to_string(),
             Reply::ConnectedData(data) => format!("ConnectedData: {data:?}"),
             Reply::ConnectedSent(data) => format!("ConnectedSent: {data:?}"),
             Reply::Unproto(data) => format!("Received unproto: {data:?}"),
             Reply::PortInfo(s) => format!("Port info: {s:?}"),
             Reply::PortCaps(port, s) => format!("Port caps for port {port:?}: {s:?}"),
-            Reply::Connected(s) => format!("Connected: {s}"),
+            Reply::ConnectionEstablished(s) => format!("Connected: {s:?}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::CallsignHeard(port, c) => format!("Heard on {port:?}: {c:?}"),
             Reply::Raw(_data) => "Raw".to_string(),
@@ -130,7 +152,7 @@ impl Reply {
 }
 
 #[allow(clippy::too_many_lines)]
-fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
+pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     // TODO: confirm data len, since most replies will have fixed size.
     Ok(match header.data_kind {
         b'R' => {
@@ -147,8 +169,20 @@ fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             Reply::Version(major, minor)
         }
         b'X' => Reply::CallsignRegistration(data[0] == 1),
-        b'C' => Reply::Connected(std::str::from_utf8(data).map_err(Error::other)?.to_string()),
-        b'D' => Reply::ConnectedData(data.to_vec()),
+        b'C' => Reply::ConnectionEstablished(Connected {
+            port: header.port,
+            pid: header.pid,
+            src: header.src.clone().unwrap(),
+            dst: header.dst.clone().unwrap(),
+            data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
+        }),
+        b'D' => Reply::ConnectedData(ConnectedData {
+            port: header.port,
+            pid: header.pid,
+            src: header.src.clone().unwrap(),
+            dst: header.dst.clone().unwrap(),
+            data: data.to_vec(),
+        }),
         b'd' => Reply::Disconnect,
         b'T' => Reply::ConnectedSent(data.to_vec()),
         b'U' => Reply::Unproto(data.to_vec()),
@@ -640,9 +674,9 @@ impl AGW {
     /// # Errors
     ///
     /// If underlying connection fails.
-    pub fn register_callsign(&mut self, port: Port, pid: Pid, src: &Call) -> Result<()> {
+    pub fn register_callsign(&mut self, port: Port, src: &Call) -> Result<()> {
         debug!("Registering callsign");
-        self.send(&Packet::RegisterCallsign(port, pid, src.clone()).serialize())?;
+        self.send(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
         Ok(())
     }
 
@@ -690,9 +724,9 @@ impl AGW {
                 continue;
             }
             match r {
-                Reply::Connected(i) => {
-                    connect_string = i.clone();
-                    debug!("Connected from {src} to {dst} with connect string {i}");
+                Reply::ConnectionEstablished(i) => {
+                    connect_string = i.data.clone();
+                    debug!("Connected from {src} to {dst} with connect string {connect_string}");
                     break;
                 }
                 other => self.rx_enqueue(head, other),
@@ -742,7 +776,7 @@ impl AGW {
             }
             match payload {
                 Reply::ConnectedData(data) => {
-                    let ret = data.clone();
+                    let ret = data.data.clone();
                     let mut tail = self.rxqueue.split_off(*n);
                     tail.pop_front();
                     self.rxqueue.append(&mut tail);
@@ -761,7 +795,7 @@ impl AGW {
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
-                Reply::ConnectedData(i) => return Ok(i),
+                Reply::ConnectedData(i) => return Ok(i.data),
                 other => self.rx_enqueue(h, other),
             }
         }

@@ -39,7 +39,7 @@ pub enum Packet {
 
     /// Application: Port info query.
     PortInfoQuery,
-    RegisterCallsign(Port, Pid, Call),
+    RegisterCallsign(Port, Call),
     Connect {
         port: Port,
         pid: Pid,
@@ -186,8 +186,8 @@ impl Packet {
                 }
                 [h, hops.clone()].concat()
             }
-            Packet::RegisterCallsign(port, pid, src) => {
-                Header::new(*port, b'X', *pid, Some(src.clone()), None, 0).serialize()
+            Packet::RegisterCallsign(port, src) => {
+                Header::new(*port, b'X', Pid(0), Some(src.clone()), None, 0).serialize()
             }
             Packet::Disconnect {
                 port,

@@ -1,7 +1,9 @@
+use std::io::{Read, Write};
+use std::str::FromStr;
+
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
-use std::str::FromStr;
 
 use agw::{Call, Port};
 
@@ -51,19 +53,7 @@ struct Cli {
     agw_addr: String,
 }
 
-fn main() -> Result<()> {
-    let opt = Cli::parse();
-    stderrlog::new()
-        .module(module_path!())
-        .module("agw")
-        .quiet(false)
-        .verbosity(opt.verbose)
-        .timestamp(stderrlog::Timestamp::Second)
-        .init()
-        .unwrap();
-
-    let mut agw = agw::AGW::new(&opt.agw_addr)?;
-
+fn main2(opt: Cli, agw: &agw::v2::AGW) -> Result<()> {
     match opt.command {
         Command::Version {} => {
             let (a, b) = agw.version()?;
@@ -85,8 +75,8 @@ fn main() -> Result<()> {
             println!("{h:?}");
         }
         Command::FramesOutstandingPort { port } => {
-            let cap = agw.frames_outstanding(port)?;
-            println!("{cap:?}");
+            let n = agw.frames_outstanding(port)?;
+            println!("Frames outstanding on {port:?}: {n}");
         }
         Command::Unproto { src, dst, msg } => {
             let pid = agw::Pid(0xF0); // TODO: make a flag.
@@ -100,21 +90,55 @@ fn main() -> Result<()> {
             )?;
         }
         Command::Connect { src, dst } => {
+            let mut buf = [0u8; 128];
+
             let port = agw::Port(0); // TODO
-            let pid = agw::Pid(0xF0); // TODO: make a flag.
             let src = &Call::from_str(&src)?;
             agw.register_callsign(port, src)?;
-            let mut con = agw.connect(port, pid, src, &Call::from_str(&dst)?, &[])?;
-            con.write(b"echo hello world\n")?;
-            eprintln!("Read: {:?}", ascii7_to_str(&con.read()?));
+            let mut con = agw.connect(port, src.clone(), Call::from_str(&dst)?, &[])?;
+            con.write_all(b"echo hello world\n")?;
+            let data = {
+                let n = con.read(&mut buf)?;
+                &buf[..n]
+            };
+            eprintln!("Read: {:?}", ascii7_to_str(data));
             std::thread::sleep(std::time::Duration::from_secs(3));
-            con.write(b"BYE\r")?;
+            con.write_all(b"BYE\r")?;
             for _ in 0..10 {
-                eprintln!("Read: {:?}", ascii7_to_str(&con.read()?));
+                let data = {
+                    let n = con.read(&mut buf)?;
+                    &buf[..n]
+                };
+                eprintln!("Read: {:?}", ascii7_to_str(data));
             }
-            con.disconnect()?;
         }
     }
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let opt = Cli::parse();
+    stderrlog::new()
+        .module(module_path!())
+        .module("agw")
+        .quiet(false)
+        .verbosity(opt.verbose)
+        .timestamp(stderrlog::Timestamp::Second)
+        .init()
+        .unwrap();
+
+    let wstream = std::net::TcpStream::connect(&opt.agw_addr)?;
+    let rstream = wstream.try_clone()?;
+    let shut = wstream.try_clone()?;
+    let agw = agw::v2::AGW::new();
+    let jh = agw.run(rstream, wstream);
+    main2(opt, &agw)?;
+    eprintln!("Closing");
+    drop(agw);
+    // TODO: needed to shut down the reader.
+    shut.shutdown(std::net::Shutdown::Both)?;
+    jh.join().map_err(|e| agw::Error::msg(format!("{e:?}")))?;
+    eprintln!("Thread joined");
     Ok(())
 }
 

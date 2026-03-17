@@ -272,7 +272,7 @@ fn main() -> Result<()> {
     let mut agw = agw::AGW::new(&opt.agw_addr)?;
     let src = &Call::from_str(&opt.src)?;
     let dst = &Call::from_str(&opt.dst)?;
-    agw.register_callsign(Port(opt.port), Pid(opt.pid), src)?;
+    agw.register_callsign(Port(opt.port), src)?;
     let mut con = agw.connect(Port(opt.port), Pid(opt.pid), src, dst, &[])?;
     let initial_status: String = con.connect_string().into();
     status_tx
