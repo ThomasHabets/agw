@@ -27,7 +27,6 @@ impl Drop for Reader {
     }
 }
 
-#[derive(Default)]
 struct AgwCon {
     id: std::sync::atomic::AtomicU64,
     children: Mutex<HashMap<u64, std::sync::mpsc::Sender<Reply>>>,
@@ -35,10 +34,22 @@ struct AgwCon {
     txq: Mutex<Vec<u8>>,
     txq_notify: std::sync::Condvar,
 
+    shut_fd: std::os::fd::OwnedFd,
     exiting: std::sync::atomic::AtomicBool,
 }
 
 impl AgwCon {
+    fn new(shut_fd: std::os::fd::OwnedFd) -> Self {
+        Self {
+            id: 0.into(),
+            children: Mutex::new(HashMap::new()),
+            txq: Mutex::new(vec![]),
+            txq_notify: std::sync::Condvar::default(),
+            exiting: false.into(),
+            shut_fd,
+        }
+    }
+
     fn run<R: Poll + Read + Send, W: Write + Send>(&self, r: R, w: W) {
         std::thread::scope(|s| {
             let jhr = s.spawn(move || {
@@ -112,11 +123,13 @@ impl AgwCon {
         }
     }
     fn reader_inner(&self, mut r: impl Read + Poll) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
         let mut header = [0_u8; HEADER_LEN];
         loop {
             // Poll for ready or done.
             // TODO: actually poll some pipe.
-            if let PollResult::Other = r.poll(-1)? {
+            if let PollResult::Other = r.poll(self.shut_fd.as_raw_fd())? {
                 return Ok(());
             }
             // Read header.
@@ -144,6 +157,7 @@ impl AgwCon {
 /// AGW connection.
 pub struct AGW {
     parent: Arc<AgwCon>,
+    shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
 }
 
 pub struct Connection {
@@ -235,7 +249,7 @@ impl<T: std::os::fd::AsFd> Poll for T {
                 if fds[0].revents & libc::POLLIN != 0 {
                     return Ok(PollResult::This);
                 }
-                if fds[1].revents & libc::POLLIN != 0 {
+                if fds[1].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                     return Ok(PollResult::Other);
                 }
                 panic!("Can't happen: poll() returned 1, but nothing ready");
@@ -245,19 +259,37 @@ impl<T: std::os::fd::AsFd> Poll for T {
     }
 }
 
+fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        unsafe {
+            Ok((
+                std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+            ))
+        }
+    }
+}
 impl AGW {
     /// Create AGW connection to ip:port.
     //
     // TODO: pass in the reader/writer, and clippy won't complain about "this
     // should be Default".
-    #[must_use]
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        let parent = Arc::new(AgwCon::default());
-        Self { parent }
+    pub fn new() -> Result<Self> {
+        let (r, w) = pipe()?;
+        let parent = Arc::new(AgwCon::new(r));
+        Ok(Self {
+            parent,
+            shut_fd: Mutex::new(Some(w)),
+        })
     }
     pub fn shut(&self) {
         self.parent.shut();
+        self.shut_fd.lock().unwrap().take();
     }
     pub fn run<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
         &self,

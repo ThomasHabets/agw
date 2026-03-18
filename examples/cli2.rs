@@ -129,14 +129,11 @@ fn main() -> Result<()> {
 
     let wstream = std::net::TcpStream::connect(&opt.agw_addr)?;
     let rstream = wstream.try_clone()?;
-    let shut = wstream.try_clone()?;
-    let agw = agw::v2::AGW::new();
+    let agw = agw::v2::AGW::new()?;
     let jh = agw.run(rstream, wstream);
     main2(opt, &agw)?;
     eprintln!("Closing");
     drop(agw);
-    // TODO: needed to shut down the reader.
-    shut.shutdown(std::net::Shutdown::Both)?;
     jh.join().map_err(|e| agw::Error::msg(format!("{e:?}")))?;
     eprintln!("Thread joined");
     Ok(())
