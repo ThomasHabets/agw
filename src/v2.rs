@@ -88,7 +88,7 @@ impl AgwCon {
     fn rx_off(&self, id: u64) {
         self.children.lock().unwrap().remove(&id);
     }
-    pub fn shut(&self) {
+    fn stop(&self) {
         self.exiting
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.txq_notify.notify_all();
@@ -158,6 +158,7 @@ impl AgwCon {
 pub struct AGW {
     parent: Arc<AgwCon>,
     shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct Connection {
@@ -276,28 +277,32 @@ fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
 }
 impl AGW {
     /// Create AGW connection to ip:port.
-    //
-    // TODO: pass in the reader/writer, and clippy won't complain about "this
-    // should be Default".
-    pub fn new() -> Result<Self> {
-        let (r, w) = pipe()?;
-        let parent = Arc::new(AgwCon::new(r));
-        Ok(Self {
-            parent,
-            shut_fd: Mutex::new(Some(w)),
-        })
-    }
-    pub fn shut(&self) {
-        self.parent.shut();
-        self.shut_fd.lock().unwrap().take();
-    }
-    pub fn run<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
-        &self,
+    pub fn new<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
         r: R,
         w: W,
-    ) -> std::thread::JoinHandle<()> {
-        let parent = self.parent.clone();
-        std::thread::spawn(move || parent.run(r, w))
+    ) -> Result<Self> {
+        let (pr, pw) = pipe()?;
+        let parent = Arc::new(AgwCon::new(pr));
+        let p2 = parent.clone();
+        let join_handle = std::thread::spawn(move || p2.run(r, w));
+        Ok(Self {
+            parent,
+            shut_fd: Mutex::new(Some(pw)),
+            join_handle: Some(join_handle),
+        })
+    }
+    pub fn stop(&self) {
+        self.parent.stop();
+        self.shut_fd.lock().unwrap().take();
+    }
+    pub fn stop_wait(self) -> Result<()> {
+        self.stop();
+        self.wait()
+    }
+    pub fn wait(mut self) -> Result<()> {
+        let jh = self.join_handle.take().unwrap();
+        jh.join()
+            .map_err(|e| Error::msg(format!("AGW thread join handle: {e:?}")))
     }
 
     /// Get AGW version.
@@ -470,6 +475,7 @@ impl AGW {
 
 impl Drop for AGW {
     fn drop(&mut self) {
-        self.shut();
+        self.stop();
+        // Don't wait for thread to exit. If you want to wait, call stop_wait().
     }
 }

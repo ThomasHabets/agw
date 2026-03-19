@@ -129,12 +129,13 @@ fn main() -> Result<()> {
 
     let wstream = std::net::TcpStream::connect(&opt.agw_addr)?;
     let rstream = wstream.try_clone()?;
-    let agw = agw::v2::AGW::new()?;
-    let jh = agw.run(rstream, wstream);
+    let agw = agw::v2::AGW::new(rstream, wstream)?;
     main2(opt, &agw)?;
+
+    // Optionally stop and wait.
     eprintln!("Closing");
-    drop(agw);
-    jh.join().map_err(|e| agw::Error::msg(format!("{e:?}")))?;
+    agw.stop_wait()?;
+    //drop(agw);
     eprintln!("Thread joined");
     Ok(())
 }
