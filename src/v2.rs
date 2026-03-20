@@ -50,7 +50,7 @@ impl AgwCon {
         }
     }
 
-    fn run<R: Poll + Read + Send, W: Write + Send>(&self, r: R, w: W) {
+    fn run<R: Poll + Read + Send, W: Write + Send>(&self, r: R, w: W) -> Result<()> {
         std::thread::scope(|s| {
             let jhr = s.spawn(move || {
                 self.reader(r);
@@ -60,9 +60,21 @@ impl AgwCon {
                 self.writer(w);
                 debug!("Writer exited");
             });
-            jhr.join().expect("failed to join reader");
-            jhw.join().expect("failed to join writer");
-        });
+            let jhr = jhr.join();
+            let jhw = jhw.join();
+            let ret = match (jhr, jhw) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Ok(()), Err(e)) => Err(Error::msg(format!("write thread: {e:?}"))),
+                (Err(e), Ok(())) => Err(Error::msg(format!("read thread: {e:?}"))),
+                (Err(e1), Err(e2)) => Err(Error::msg(format!(
+                    "read thread: {e1:?} write thread: {e2:?}"
+                ))),
+            };
+            if let Err(ref e) = ret {
+                warn!("AGW subthread error: {e:?}");
+            }
+            ret
+        })
     }
     /// Write from application to AGW server.
     fn write(&self, data: &[u8]) -> Result<()> {
@@ -158,7 +170,7 @@ impl AgwCon {
 pub struct AGW {
     parent: Arc<AgwCon>,
     shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
-    join_handle: Option<std::thread::JoinHandle<()>>,
+    join_handle: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
 pub struct Connection {
@@ -300,9 +312,12 @@ impl AGW {
         self.wait()
     }
     pub fn wait(mut self) -> Result<()> {
-        let jh = self.join_handle.take().unwrap();
+        let jh = self
+            .join_handle
+            .take()
+            .expect("can't happen: wait() called a second time");
         jh.join()
-            .map_err(|e| Error::msg(format!("AGW thread join handle: {e:?}")))
+            .map_err(|e| Error::msg(format!("failed to join AGW thread: {e:?}")))?
     }
 
     /// Get AGW version.
