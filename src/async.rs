@@ -1,6 +1,9 @@
 use log::debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -330,6 +333,9 @@ impl AGW {
                 agw: self,
                 _rule_handle: rule_handle,
                 rx: rxd,
+                read_buf: vec![],
+                pending_write: None,
+                pending_shutdown: None,
                 disconnected: false,
             }),
             other => {
@@ -352,6 +358,9 @@ pub struct Connection<'a> {
     disconnected: bool,
     _rule_handle: RuleHandle,
     rx: mpsc::Receiver<Packet>,
+    read_buf: Vec<u8>,
+    pending_write: Option<PendingWrite>,
+    pending_shutdown: Option<PendingSend>,
 }
 
 impl Connection<'_> {
@@ -361,10 +370,7 @@ impl Connection<'_> {
     ///
     /// Fails if the connection fails.
     pub async fn recv(&mut self) -> Result<Packet> {
-        let _ = self.connect_string;
-        let _ = self.disconnected;
-        let _ = self.src;
-        let _ = self.dst;
+        let _ = &self.connect_string;
         self.rx.recv().await.ok_or(Error::msg("recv failed"))
     }
     /// Send data on connection.
@@ -373,13 +379,196 @@ impl Connection<'_> {
     ///
     /// Fails if the connection fails.
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        let packet = Packet::Data {
+        if self.disconnected {
+            return Err(Error::msg("connection disconnected"));
+        }
+        let packet = self.data_packet(data.to_vec());
+        self.agw.send(packet).await
+    }
+
+    fn data_packet(&self, data: Vec<u8>) -> Packet {
+        Packet::Data {
             port: self.port,
             pid: self.pid,
             src: self.src.clone(),
             dst: self.dst.clone(),
-            data: data.to_vec(),
+            data,
+        }
+    }
+
+    fn disconnect_packet(&self) -> Packet {
+        Packet::Disconnect {
+            port: self.port,
+            pid: self.pid,
+            src: self.src.clone(),
+            dst: self.dst.clone(),
+        }
+    }
+
+    fn send_future(&self, packet: Packet) -> PendingSend {
+        let tx = self.agw.con.tx.clone();
+        Box::pin(async move { tx.send(packet).await })
+    }
+
+    fn drain_read_buf(&mut self, buf: &mut ReadBuf<'_>) {
+        let n = buf.remaining().min(self.read_buf.len());
+        buf.put_slice(&self.read_buf[..n]);
+        self.read_buf.drain(..n);
+    }
+
+    fn poll_pending_write(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<usize>> {
+        let Some(pending) = self.pending_write.as_mut() else {
+            return Poll::Ready(Ok(0));
         };
-        self.agw.send(packet).await
+        match pending.fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(())) => {
+                let len = pending.len;
+                self.pending_write = None;
+                Poll::Ready(Ok(len))
+            }
+            Poll::Ready(Err(e)) => {
+                self.pending_write = None;
+                self.disconnected = true;
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    e.to_string(),
+                )))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_pending_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let Some(pending) = self.pending_shutdown.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match pending.as_mut().poll(cx) {
+            Poll::Ready(Ok(())) => {
+                self.pending_shutdown = None;
+                self.disconnected = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                self.pending_shutdown = None;
+                self.disconnected = true;
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    e.to_string(),
+                )))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+type PendingSend =
+    Pin<Box<dyn Future<Output = std::result::Result<(), mpsc::error::SendError<Packet>>> + Send>>;
+
+struct PendingWrite {
+    len: usize,
+    fut: PendingSend,
+}
+
+impl AsyncRead for Connection<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if !this.read_buf.is_empty() {
+            this.drain_read_buf(buf);
+            return Poll::Ready(Ok(()));
+        }
+        if this.disconnected {
+            return Poll::Ready(Ok(()));
+        }
+        loop {
+            match Pin::new(&mut this.rx).poll_recv(cx) {
+                Poll::Ready(Some(Packet::Data { data, .. })) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    this.read_buf.extend(data);
+                    this.drain_read_buf(buf);
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Some(Packet::Disconnect { .. })) => {
+                    this.disconnected = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Some(other)) => {
+                    debug!("Ignoring non-data packet on connection stream: {other:?}");
+                }
+                Poll::Ready(None) => {
+                    this.disconnected = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for Connection<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match this.poll_pending_shutdown(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+        if this.pending_shutdown.is_none() && this.disconnected {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "connection disconnected",
+            )));
+        }
+        match this.poll_pending_write(cx) {
+            Poll::Ready(Ok(n)) if n > 0 => return Poll::Ready(Ok(n)),
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(_)) => {}
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        this.pending_write = Some(PendingWrite {
+            len: buf.len(),
+            fut: this.send_future(this.data_packet(buf.to_vec())),
+        });
+        this.poll_pending_write(cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match this.poll_pending_write(cx) {
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match this.poll_pending_write(cx) {
+            Poll::Ready(Ok(_)) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+        if this.disconnected && this.pending_shutdown.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        if this.pending_shutdown.is_none() {
+            this.pending_shutdown = Some(this.send_future(this.disconnect_packet()));
+        }
+        this.poll_pending_shutdown(cx)
     }
 }
