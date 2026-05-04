@@ -4,6 +4,7 @@ use crate::{Call, Header};
 use crate::{Error, Result};
 
 const CMD_CONNECT: u8 = b'C';
+const CMD_DISCONNECT: u8 = b'd';
 const CMD_DATA: u8 = b'D';
 
 /// Port number.
@@ -300,7 +301,18 @@ impl Packet {
                     return Err(Error::msg(format!("unknown C {s}")));
                 }
             }
-            //b'd' => Packet::Disconnect,
+            CMD_DISCONNECT => Packet::Disconnect {
+                port: header.port,
+                pid: header.pid,
+                src: header
+                    .src
+                    .clone()
+                    .ok_or(Error::msg("disconnect missing src"))?,
+                dst: header
+                    .dst
+                    .clone()
+                    .ok_or(Error::msg("disconnect missing dst"))?,
+            },
             CMD_DATA => Packet::Data {
                 port: header.port,
                 pid: header.pid,
