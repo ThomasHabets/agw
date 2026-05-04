@@ -46,18 +46,24 @@ pub struct Rule {
 impl RuleMatch {
     fn matches(&self, packet: &Packet) -> bool {
         match self {
-            RuleMatch::Data { port, src, dst } => {
-                if let Packet::Data {
+            RuleMatch::Data { port, src, dst } => match packet {
+                Packet::Data {
                     port: port2,
                     pid: _,
                     src: src2,
                     dst: dst2,
                     data: _,
-                } = packet
-                {
+                }
+                | Packet::Disconnect {
+                    port: port2,
+                    pid: _,
+                    src: src2,
+                    dst: dst2,
+                } => {
                     return port == port2 && src == src2 && dst == dst2;
                 }
-            }
+                _ => {}
+            },
             RuleMatch::ConnectionEstablished { port, src, dst } => {
                 if let Packet::ConnectionEstablished {
                     port: port2,
@@ -192,21 +198,28 @@ impl Pipo {
                     if header.data_len > 0 {
                         let mut payload = vec![0; header.data_len as usize];
                         tokio::select! {
-                                        ok = con.read_exact(&mut payload) => {
-                            ok?;
-                        let packet = Packet::parse(header, &payload)?;
-                        debug!("Sending off packet {packet:?}");
-                            router.process(packet).await?;
-                        debug!("packet sent");
-                            state = PIPOState::AwaitHeader;
-                                        },
-                                        p = rx.recv() => match p {
-                            Some(p) => con.write_all(&p.serialize()).await?,
-                            // TODO: should we continue receiving
-                            // from con, still?
-                            None => return Ok(()),
-                                        },
-                                    };
+                            ok = con.read_exact(&mut payload) => {
+                                ok?;
+                                let packet = Packet::parse(header, &payload)?;
+                                debug!("Sending off packet {packet:?}");
+                                router.process(packet).await?;
+                                debug!("packet sent");
+                                state = PIPOState::AwaitHeader;
+                            },
+                            p = rx.recv() => match p {
+                                Some(p) => con.write_all(&p.serialize()).await?,
+                                // TODO: should we continue receiving
+                                // from con, still? Could deadlock?
+                                None => return Ok(()),
+                            },
+                        };
+                    } else {
+                        // Disconnect.
+                        let packet = Packet::parse(header, &[])?;
+                        debug!("Sending off packet (should be Disconnect) {packet:?}");
+                        router.process(packet).await?;
+                        debug!("packet sent (disconnect)");
+                        state = PIPOState::AwaitHeader;
                     }
                 }
             }
