@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
-use log::{debug, trace};
+use log::{debug, trace, info};
 
 use crate::Packet;
 use crate::{Error, Result};
@@ -37,7 +37,7 @@ impl Proxy {
         cb_up: &dyn Fn(Packet) -> Option<Packet>,
         cb_down: &dyn Fn(Packet) -> Option<Packet>,
     ) -> Result<()> {
-        eprintln!("Running proxy");
+        info!("Running proxy");
         self.up.send(Packet::VersionQuery)?;
         loop {
             select! {
@@ -112,7 +112,7 @@ impl ConnectionV2 {
             for packet in txrx {
                 let bytes = packet.serialize();
                 let _ = wstream.write(&bytes)?;
-                eprintln!("Send: {bytes:?}");
+                debug!("Send: {bytes:?}");
             }
             Ok(())
         });

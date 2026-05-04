@@ -122,7 +122,7 @@ impl AgwCon {
         match self.reader_inner(r) {
             Ok(()) => {} // TODO: send EOF to all children?
             Err(e) => {
-                eprintln!("Reader error: {e}");
+                warn!("Reader error: {e}");
                 let children = self.children.lock().unwrap();
                 for child in children.values() {
                     if let Err(e) =
@@ -329,7 +329,7 @@ impl AGW {
                 Reply::Error(e) => Err(e),
                 Reply::Version(a, b) => Ok((a, b)),
                 other => {
-                    eprintln!("Got other: {other:?}");
+                    warn!("Got other: {other:?}");
                     continue;
                 }
             };
@@ -345,7 +345,7 @@ impl AGW {
                 Reply::Error(e) => Err(e),
                 Reply::PortInfo(i) => Ok(i),
                 other => {
-                    eprintln!("Got other: {other:?}");
+                    warn!("Got other: {other:?}");
                     continue;
                 }
             };
@@ -361,7 +361,7 @@ impl AGW {
                 Reply::Error(e) => Err(e),
                 Reply::PortCaps(_port, caps) => Ok(caps),
                 other => {
-                    eprintln!("Got other: {other:?}");
+                    warn!("Got other: {other:?}");
                     continue;
                 }
             };
@@ -378,7 +378,7 @@ impl AGW {
                 Reply::Error(e) => Err(e),
                 Reply::CallsignHeard(_port, heard) => Ok(heard),
                 other => {
-                    eprintln!("Got other: {other:?}");
+                    warn!("Got other: {other:?}");
                     continue;
                 }
             };
@@ -395,7 +395,7 @@ impl AGW {
                 Reply::Error(e) => Err(e),
                 Reply::FramesOutstandingPort(_port, n) => Ok(n),
                 other => {
-                    eprintln!("Got other: {other:?}");
+                    warn!("Got other: {other:?}");
                     continue;
                 }
             };
