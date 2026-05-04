@@ -497,6 +497,7 @@ impl AsyncRead for Connection<'_> {
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Some(Packet::Disconnect { .. })) => {
+                    debug!("Disconnect frame");
                     this.disconnected = true;
                     return Poll::Ready(Ok(()));
                 }
@@ -504,6 +505,7 @@ impl AsyncRead for Connection<'_> {
                     debug!("Ignoring non-data packet on connection stream: {other:?}");
                 }
                 Poll::Ready(None) => {
+                    debug!("EOF");
                     this.disconnected = true;
                     return Poll::Ready(Ok(()));
                 }

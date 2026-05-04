@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
-use log::{debug, trace, info};
+use log::{debug, info, trace};
 
 use crate::Packet;
 use crate::{Error, Result};
