@@ -1,6 +1,6 @@
 # AGW library
 
-Rust library for speaking AGW with e.g. Direwolf
+Rust library for speaking AGW with e.g. Direwolf.
 
 <https://github.com/ThomasHabets/agw>
 

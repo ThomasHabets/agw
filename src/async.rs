@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
-use log::{trace, debug};
+use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -12,7 +12,7 @@ use crate::{parse_header, Call, Header, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
 
 const PID_AX25: Pid = Pid(0xf0);
-const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 type RuleIdent = u64;
 
@@ -362,15 +362,15 @@ impl AGW {
         })
     }
 
-    fn make_connection<'a>(
-        &'a self,
+    fn make_connection(
+        &self,
         port: Port,
         pid: Pid,
         src: Call,
         dst: Call,
         rule_handle: RuleHandle,
         rx: mpsc::Receiver<Packet>,
-    ) -> Connection<'a> {
+    ) -> Connection<'_> {
         Connection {
             connect_string: "TODO".to_string(),
             port,
@@ -452,7 +452,7 @@ impl AGW {
             } => {
                 trace!("Connection established!");
                 Ok(self.make_connection(port, pid, src.clone(), dst.clone(), rule_handle, rxd))
-            },
+            }
             other => {
                 panic!("received unexpected packet: {other:?}")
             }

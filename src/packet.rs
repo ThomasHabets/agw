@@ -1,4 +1,4 @@
-use log::{trace, debug};
+use log::{debug, trace};
 
 use crate::{Call, Header};
 use crate::{Error, Result};
@@ -188,9 +188,15 @@ impl Packet {
                 }
                 [h, hops.clone()].concat()
             }
-            Packet::RegisterCallsign(port, src) => {
-                Header::new(*port, CMD_REGISTER_CALLSIGN, Pid(0), Some(src.clone()), None, 0).serialize()
-            }
+            Packet::RegisterCallsign(port, src) => Header::new(
+                *port,
+                CMD_REGISTER_CALLSIGN,
+                Pid(0),
+                Some(src.clone()),
+                None,
+                0,
+            )
+            .serialize(),
             Packet::Disconnect {
                 port,
                 pid,
@@ -210,19 +216,23 @@ impl Packet {
                 trace!("Sending data with pid {pid:?}");
                 // TODO: magic number.
                 for chunk in data.chunks(200) {
-                    chunks.push(Header::new(
-                        *port,
-                        CMD_DATA,
-                        *pid,
-                        Some(src.clone()),
-                        Some(dst.clone()),
-                        u32::try_from(chunk.len()).expect("TODO: error this, or make it impossible"),
-                    )
-                    .serialize());
+                    chunks.push(
+                        Header::new(
+                            *port,
+                            CMD_DATA,
+                            *pid,
+                            Some(src.clone()),
+                            Some(dst.clone()),
+                            u32::try_from(chunk.len())
+                                .expect("TODO: error this, or make it impossible"),
+                        )
+                        .serialize(),
+                    );
                     chunks.push(chunk.to_vec());
                 }
                 chunks
-                }.concat(),
+            }
+            .concat(),
             Packet::Unproto {
                 port,
                 pid,
@@ -332,8 +342,10 @@ impl Packet {
                     .ok_or(Error::msg("data with missing dst"))?,
                 data: data.to_vec(),
             },
-            CMD_REGISTER_CALLSIGN => Packet::RegisterCallsign(header.port,
-                                         header.src
+            CMD_REGISTER_CALLSIGN => Packet::RegisterCallsign(
+                header.port,
+                header
+                    .src
                     .clone()
                     .ok_or(Error::msg("data with missing src"))?,
             ),
