@@ -1,10 +1,11 @@
-use log::debug;
+use log::{trace, debug};
 
 use crate::{Call, Header};
 use crate::{Error, Result};
 
 const CMD_CONNECT: u8 = b'C';
 const CMD_DISCONNECT: u8 = b'd';
+const CMD_REGISTER_CALLSIGN: u8 = b'X';
 const CMD_DATA: u8 = b'D';
 
 /// Port number.
@@ -188,7 +189,7 @@ impl Packet {
                 [h, hops.clone()].concat()
             }
             Packet::RegisterCallsign(port, src) => {
-                Header::new(*port, b'X', Pid(0), Some(src.clone()), None, 0).serialize()
+                Header::new(*port, CMD_REGISTER_CALLSIGN, Pid(0), Some(src.clone()), None, 0).serialize()
             }
             Packet::Disconnect {
                 port,
@@ -204,19 +205,24 @@ impl Packet {
                 src,
                 dst,
                 data,
-            } => [
-                Header::new(
-                    *port,
-                    b'D',
-                    *pid,
-                    Some(src.clone()),
-                    Some(dst.clone()),
-                    u32::try_from(data.len()).expect("TODO: error this, or make it impossible"),
-                )
-                .serialize(),
-                data.clone(),
-            ]
-            .concat(),
+            } => {
+                let mut chunks = Vec::new();
+                trace!("Sending data with pid {pid:?}");
+                // TODO: magic number.
+                for chunk in data.chunks(200) {
+                    chunks.push(Header::new(
+                        *port,
+                        CMD_DATA,
+                        *pid,
+                        Some(src.clone()),
+                        Some(dst.clone()),
+                        u32::try_from(chunk.len()).expect("TODO: error this, or make it impossible"),
+                    )
+                    .serialize());
+                    chunks.push(chunk.to_vec());
+                }
+                chunks
+                }.concat(),
             Packet::Unproto {
                 port,
                 pid,
@@ -326,6 +332,11 @@ impl Packet {
                     .ok_or(Error::msg("data with missing dst"))?,
                 data: data.to_vec(),
             },
+            CMD_REGISTER_CALLSIGN => Packet::RegisterCallsign(header.port,
+                                         header.src
+                    .clone()
+                    .ok_or(Error::msg("data with missing src"))?,
+            ),
             _ => {
                 return Err(Error::msg(format!(
                     "unknown packet kind {}",

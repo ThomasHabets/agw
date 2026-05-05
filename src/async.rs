@@ -1,8 +1,9 @@
-use log::debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
+
+use log::{trace, debug};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -10,25 +11,31 @@ use tokio::sync::mpsc;
 use crate::{parse_header, Call, Header, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
 
-const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const PID_AX25: Pid = Pid(0xf0);
+const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 type RuleIdent = u64;
 
 pub struct RuleHandle {
     ident: RuleIdent,
-    router: Weak<Router>,
+    rules: Weak<Mutex<Vec<Rule>>>,
 }
 
 impl RuleHandle {
-    fn new(ident: RuleIdent, router: Weak<Router>) -> Self {
-        Self { ident, router }
+    fn new(ident: RuleIdent, rules: Weak<Mutex<Vec<Rule>>>) -> Self {
+        Self { ident, rules }
     }
 }
 
 impl Drop for RuleHandle {
     fn drop(&mut self) {
-        if let Some(router) = self.router.upgrade() {
-            router.del(self.ident);
+        if let Some(rules) = self.rules.upgrade() {
+            let mut rules = rules.lock().unwrap();
+            *rules = rules
+                .iter()
+                .filter(|&r| r.ident != self.ident)
+                .map(std::borrow::ToOwned::to_owned)
+                .collect();
         }
     }
 }
@@ -37,13 +44,20 @@ impl Drop for RuleHandle {
 pub enum RuleMatch {
     Data { port: Port, src: Call, dst: Call },
     ConnectionEstablished { port: Port, src: Call, dst: Call },
+    IncomingConnect { port: Port, dst: Call },
 }
 
 #[derive(Clone)]
 pub struct Rule {
     ident: RuleIdent,
     m: RuleMatch,
-    tx: mpsc::Sender<Packet>,
+    sink: RuleSink,
+}
+
+#[derive(Clone)]
+enum RuleSink {
+    Packet(mpsc::Sender<Packet>),
+    Listener(mpsc::Sender<PendingConnection>),
 }
 
 impl RuleMatch {
@@ -78,6 +92,17 @@ impl RuleMatch {
                     return port == port2 && src == src2 && dst == dst2;
                 }
             }
+            RuleMatch::IncomingConnect { port, dst } => {
+                if let Packet::IncomingConnect {
+                    port: port2,
+                    pid: _,
+                    src: _,
+                    dst: dst2,
+                } = packet
+                {
+                    return port == port2 && dst == dst2;
+                }
+            }
         }
         false
     }
@@ -97,13 +122,27 @@ impl Router {
         }
     }
     pub fn add(self: &Arc<Self>, m: RuleMatch, tx: mpsc::Sender<Packet>) -> RuleHandle {
+        self.add_inner(m, RuleSink::Packet(tx))
+    }
+    fn add_incoming_listener(
+        &self,
+        port: Port,
+        dst: Call,
+        tx: mpsc::Sender<PendingConnection>,
+    ) -> RuleHandle {
+        self.add_inner(
+            RuleMatch::IncomingConnect { port, dst },
+            RuleSink::Listener(tx),
+        )
+    }
+    fn add_inner(&self, m: RuleMatch, sink: RuleSink) -> RuleHandle {
         let ident = {
             let mut ident = self.ident.lock().unwrap();
             *ident += 1;
             *ident
         };
-        self.rules.lock().unwrap().push(Rule { ident, m, tx });
-        RuleHandle::new(ident, Arc::downgrade(self))
+        self.rules.lock().unwrap().push(Rule { ident, m, sink });
+        RuleHandle::new(ident, Arc::downgrade(&self.rules))
     }
     pub fn del(&self, ident: RuleIdent) {
         // TODO: there has to be a more efficient way.
@@ -125,7 +164,41 @@ impl Router {
         let rules = self.rules.lock().unwrap().clone();
         for rule in &rules {
             if rule.m.matches(&packet) {
-                rule.tx.send(packet.clone()).await.map_err(Error::other)?;
+                match &rule.sink {
+                    RuleSink::Packet(tx) => {
+                        tx.send(packet.clone()).await.map_err(Error::other)?;
+                    }
+                    RuleSink::Listener(tx) => {
+                        let Packet::IncomingConnect {
+                            port,
+                            pid: _,
+                            src,
+                            dst,
+                        } = &packet
+                        else {
+                            continue;
+                        };
+                        let (txd, rxd) = mpsc::channel(10); // TODO: magic number.
+                        let rule_handle = self.add_inner(
+                            RuleMatch::Data {
+                                port: *port,
+                                src: src.clone(),
+                                dst: dst.clone(),
+                            },
+                            RuleSink::Packet(txd),
+                        );
+                        tx.send(PendingConnection {
+                            port: *port,
+                            pid: PID_AX25, // IncomingConnect always has pid 0x00.
+                            src: dst.clone(),
+                            dst: src.clone(),
+                            rule_handle,
+                            rx: rxd,
+                        })
+                        .await
+                        .map_err(Error::other)?;
+                    }
+                }
                 any = true;
             }
         }
@@ -257,11 +330,62 @@ impl AGW {
     pub async fn send(&self, data: Packet) -> Result<()> {
         self.con.send(data).await
     }
-    /*
-        pub async fn recv(&self) -> Option<Packet> {
-            self.con.recv().await
+
+    /// Register callsign.
+    ///
+    /// The specs say that registering the callsign is mandatory.
+    /// Direwolf doesn't seem to care, but other AGW implementations may.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
+    pub async fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
+        self.send(Packet::RegisterCallsign(port, src.clone())).await
     }
-        */
+
+    /// Listen for incoming connections to a local callsign.
+    ///
+    /// This registers the callsign with the AGW endpoint and then returns
+    /// a listener that can `accept()` incoming AX.25 connections.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
+    pub async fn listen<'a>(&'a self, port: Port, src: &Call) -> Result<Listener<'a>> {
+        let (tx, rx) = mpsc::channel(10); // TODO: magic number.
+        let rule_handle = self.router.add_incoming_listener(port, src.clone(), tx);
+        self.register_callsign(port, src).await?;
+        Ok(Listener {
+            agw: self,
+            _rule_handle: rule_handle,
+            rx,
+        })
+    }
+
+    fn make_connection<'a>(
+        &'a self,
+        port: Port,
+        pid: Pid,
+        src: Call,
+        dst: Call,
+        rule_handle: RuleHandle,
+        rx: mpsc::Receiver<Packet>,
+    ) -> Connection<'a> {
+        Connection {
+            connect_string: "TODO".to_string(),
+            port,
+            pid,
+            src,
+            dst,
+            agw: self,
+            _rule_handle: rule_handle,
+            rx,
+            read_buf: vec![],
+            pending_write: None,
+            pending_shutdown: None,
+            disconnected: false,
+        }
+    }
 
     /// # Errors
     ///
@@ -318,31 +442,59 @@ impl AGW {
         drop(ident);
 
         let estab = estab?;
+        trace!("Awaiting connection establishment packet having pid {pid:?}");
         match estab {
             Packet::ConnectionEstablished {
                 port: _,
                 pid: _,
                 src: _,
                 dst: _,
-            } => Ok(Connection {
-                connect_string: "TODO".to_string(),
-                port,
-                pid,
-                src: src.clone(),
-                dst: dst.clone(),
-                agw: self,
-                _rule_handle: rule_handle,
-                rx: rxd,
-                read_buf: vec![],
-                pending_write: None,
-                pending_shutdown: None,
-                disconnected: false,
-            }),
+            } => {
+                trace!("Connection established!");
+                Ok(self.make_connection(port, pid, src.clone(), dst.clone(), rule_handle, rxd))
+            },
             other => {
                 panic!("received unexpected packet: {other:?}")
             }
         }
     }
+}
+
+/// Listener for incoming AX.25 connections.
+///
+/// Created from an AGW object, using `.listen()`.
+pub struct Listener<'a> {
+    agw: &'a AGW,
+    _rule_handle: RuleHandle,
+    rx: mpsc::Receiver<PendingConnection>,
+}
+
+impl<'a> Listener<'a> {
+    /// Accept an incoming connection.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying connection fails.
+    pub async fn accept(&mut self) -> Result<Connection<'a>> {
+        let pending = self.rx.recv().await.ok_or(Error::msg("recv failed"))?;
+        Ok(self.agw.make_connection(
+            pending.port,
+            pending.pid,
+            pending.src,
+            pending.dst,
+            pending.rule_handle,
+            pending.rx,
+        ))
+    }
+}
+
+struct PendingConnection {
+    port: Port,
+    pid: Pid,
+    src: Call,
+    dst: Call,
+    rule_handle: RuleHandle,
+    rx: mpsc::Receiver<Packet>,
 }
 
 /// AX.25 connection object.
@@ -364,6 +516,30 @@ pub struct Connection<'a> {
 }
 
 impl Connection<'_> {
+    /// Return the local callsign.
+    #[must_use]
+    pub fn src(&self) -> &Call {
+        &self.src
+    }
+
+    /// Return the remote callsign.
+    #[must_use]
+    pub fn dst(&self) -> &Call {
+        &self.dst
+    }
+
+    /// Return the AGW port number.
+    #[must_use]
+    pub fn port(&self) -> Port {
+        self.port
+    }
+
+    /// Return the PID used by this connection.
+    #[must_use]
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
     /// Receive packet from connection.
     ///
     /// # Errors
