@@ -54,11 +54,11 @@ impl AgwCon {
         std::thread::scope(|s| {
             let jhr = s.spawn(move || {
                 self.reader(r);
-                debug!("Reader exited");
+                debug!("agw: Reader exited");
             });
             let jhw = s.spawn(move || {
                 self.writer(w);
-                debug!("Writer exited");
+                debug!("agw: Writer exited");
             });
             let jhr = jhr.join();
             let jhw = jhw.join();
@@ -433,7 +433,7 @@ impl AGW {
     ///
     /// If underlying connection fails.
     pub fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
-        debug!("Registering callsign");
+        debug!("agw: Registering callsign");
         self.parent
             .write(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
         Ok(())
@@ -474,7 +474,7 @@ impl AGW {
             };
         }?;
         debug!(
-            "Connected with port {:?} pid {:?} src {:?} dst {:?} data {:?}",
+            "agw: Connected with port {:?} pid {:?} src {:?} dst {:?} data {:?}",
             c.port, c.pid, c.src, c.dst, c.data
         );
         Ok(Connection {

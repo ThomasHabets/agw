@@ -42,22 +42,22 @@ impl Proxy {
         loop {
             select! {
                     recv(self.down.rx) -> packet => {
-                        debug!("Got {packet:?} from downstream");
+                        debug!("agw: Got {packet:?} from downstream");
                 match packet {
                 Ok(packet) => {
                     if let Some(p) = cb_down(packet) {
-                    debug!("… Transformed into {p:?}");
+                    debug!("agw: … Transformed into {p:?}");
                     }
                 },
                 Err(_e) => return Ok(()),
                 }
                     },
                     recv(self.up.rx) -> packet => {
-                        debug!("Got {packet:?} from upstream");
+                        debug!("agw: Got {packet:?} from upstream");
                         match packet {
                 Ok(packet) => {
                     if let Some(p) = cb_up(packet) {
-                    debug!("Transformed into {p:?}");
+                    debug!("agw: Transformed into {p:?}");
                     }
                 },
                 Err(_e) => return Ok(()),
@@ -77,7 +77,7 @@ struct ConnectionV2 {
 
 impl Drop for ConnectionV2 {
     fn drop(&mut self) {
-        debug!("Awaiting proxy thread shutdown");
+        debug!("agw: Awaiting proxy thread shutdown");
         let _ = self.txthread.take().unwrap().join();
         let _ = self.rxthread.take().unwrap().join();
     }
@@ -99,7 +99,7 @@ impl ConnectionV2 {
             //let reply = parse_reply(&header, &payload)?;
             //tx.send((header, reply))?;
             let packet = Packet::parse(&header, &payload)?;
-            trace!("ConnectionV2 rx_loop: {packet:?}");
+            trace!("agw: ConnectionV2 rx_loop: {packet:?}");
             tx.send(packet).map_err(Error::other)?;
         }
     }
@@ -112,7 +112,7 @@ impl ConnectionV2 {
             for packet in txrx {
                 let bytes = packet.serialize();
                 let _ = wstream.write(&bytes)?;
-                debug!("Send: {bytes:?}");
+                debug!("agw: Send: {bytes:?}");
             }
             Ok(())
         });

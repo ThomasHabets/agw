@@ -406,7 +406,7 @@ impl<'a> Connection<'a> {
     /// If the underlying connection fails.
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
-            debug!("disconnecting");
+            debug!("agw: disconnecting");
             self.agw.send(
                 &Packet::Disconnect {
                     port: self.port,
@@ -480,7 +480,7 @@ impl AGW {
     ///
     /// If connecting to the server fails.
     pub fn new(addr: &str) -> Result<AGW> {
-        debug!("Creating AGW to {addr}");
+        debug!("agw: Creating AGW to {addr}");
         let (tx, rx) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
         let wstream = TcpStream::connect(addr).map_err(Error::other)?;
@@ -537,7 +537,7 @@ impl AGW {
                 Vec::new()
             };
             let reply = parse_reply(&header, &payload)?;
-            trace!("Got reply: {}", reply.description());
+            trace!("agw: Got reply: {}", reply.description());
             let done = matches!(reply, Reply::Disconnect);
             tx.send((header, reply)).map_err(Error::other)?;
             if done {
@@ -675,7 +675,7 @@ impl AGW {
     ///
     /// If underlying connection fails.
     pub fn register_callsign(&mut self, port: Port, src: &Call) -> Result<()> {
-        debug!("Registering callsign");
+        debug!("agw: Registering callsign");
         self.send(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
         Ok(())
     }
@@ -726,7 +726,7 @@ impl AGW {
             match r {
                 Reply::ConnectionEstablished(i) => {
                     connect_string = i.data.clone();
-                    debug!("Connected from {src} to {dst} with connect string {connect_string}");
+                    debug!("agw: Connected from {src} to {dst} with connect string {connect_string}");
                     break;
                 }
                 other => self.rx_enqueue(head, other),
@@ -786,7 +786,7 @@ impl AGW {
                     return Err(Error::msg("remote end disconnected"));
                 }
                 _ => {
-                    debug!("Remote end send unexpected data {}", payload.description());
+                    debug!("agw: Remote end send unexpected data {}", payload.description());
                 }
             }
         }

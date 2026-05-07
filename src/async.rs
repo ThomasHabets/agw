@@ -203,7 +203,7 @@ impl Router {
             }
         }
         if !any {
-            debug!("incoming packet had no match: {packet:?}");
+            debug!("agw: incoming packet had no match: {packet:?}");
         }
         Ok(any)
     }
@@ -277,9 +277,8 @@ impl Pipo {
                             ok = con.read_exact(&mut payload) => {
                                 ok?;
                                 let packet = Packet::parse(header, &payload)?;
-                                debug!("Sending off packet {packet:?}");
+                                debug!("agw/pipo: Processing {packet:?}");
                                 router.process(packet).await?;
-                                debug!("packet sent");
                                 state = PIPOState::AwaitHeader;
                             },
                             p = rx.recv() => match p {
@@ -292,9 +291,8 @@ impl Pipo {
                     } else {
                         // Disconnect.
                         let packet = Packet::parse(header, &[])?;
-                        debug!("Sending off packet (should be Disconnect) {packet:?}");
+                        debug!("agw/pipo: Processing (should be Disconnect) {packet:?}");
                         router.process(packet).await?;
-                        debug!("packet sent (disconnect)");
                         state = PIPOState::AwaitHeader;
                     }
                 }
@@ -442,7 +440,7 @@ impl AGW {
         drop(ident);
 
         let estab = estab?;
-        trace!("Awaiting connection establishment packet having pid {pid:?}");
+        trace!("agw: Awaiting connection establishment packet having pid {pid:?}");
         match estab {
             Packet::ConnectionEstablished {
                 port: _,
@@ -450,7 +448,7 @@ impl AGW {
                 src: _,
                 dst: _,
             } => {
-                trace!("Connection established!");
+                trace!("agw: Connection established!");
                 Ok(self.make_connection(port, pid, src.clone(), dst.clone(), rule_handle, rxd))
             }
             other => {
@@ -673,15 +671,15 @@ impl AsyncRead for Connection<'_> {
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Some(Packet::Disconnect { .. })) => {
-                    debug!("Disconnect frame");
+                    debug!("agw: Disconnect frame");
                     this.disconnected = true;
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Some(other)) => {
-                    debug!("Ignoring non-data packet on connection stream: {other:?}");
+                    debug!("agw: Ignoring non-data packet on connection stream: {other:?}");
                 }
                 Poll::Ready(None) => {
-                    debug!("EOF");
+                    debug!("agw: EOF");
                     this.disconnected = true;
                     return Poll::Ready(Ok(()));
                 }

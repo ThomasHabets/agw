@@ -213,7 +213,7 @@ impl Packet {
                 data,
             } => {
                 let mut chunks = Vec::new();
-                trace!("Sending data with pid {pid:?}");
+                trace!("agw: Sending data with pid {pid:?}");
                 // TODO: magic number.
                 for chunk in data.chunks(200) {
                     chunks.push(
@@ -298,7 +298,7 @@ impl Packet {
                 if s.starts_with("*** CONNECTED WITH")
                     || s.starts_with("*** CONNECTED With Station ")
                 {
-                    debug!("Got ConnectionEstablished {s}");
+                    debug!("agw: Got ConnectionEstablished {s}");
                     Packet::ConnectionEstablished {
                         port: header.port,
                         pid: header.pid,
@@ -306,7 +306,7 @@ impl Packet {
                         dst: dst.clone(),
                     }
                 } else if s.starts_with("*** CONNECTED To Station") {
-                    debug!("Got IncomingConnect {s}");
+                    debug!("agw: Got IncomingConnect {s}");
                     Packet::IncomingConnect {
                         port: header.port,
                         pid: header.pid,
