@@ -726,7 +726,9 @@ impl AGW {
             match r {
                 Reply::ConnectionEstablished(i) => {
                     connect_string = i.data.clone();
-                    debug!("agw: Connected from {src} to {dst} with connect string {connect_string}");
+                    debug!(
+                        "agw: Connected from {src} to {dst} with connect string {connect_string}"
+                    );
                     break;
                 }
                 other => self.rx_enqueue(head, other),
@@ -786,7 +788,10 @@ impl AGW {
                     return Err(Error::msg("remote end disconnected"));
                 }
                 _ => {
-                    debug!("agw: Remote end send unexpected data {}", payload.description());
+                    debug!(
+                        "agw: Remote end send unexpected data {}",
+                        payload.description()
+                    );
                 }
             }
         }

@@ -277,7 +277,8 @@ impl Pipo {
                             ok = con.read_exact(&mut payload) => {
                                 ok?;
                                 let packet = Packet::parse(header, &payload)?;
-                                debug!("agw/pipo: Processing {packet:?}");
+                                debug!("agw/pipo: Processing packet len {}", header.data_len);
+                                trace!("agw/pipo: Processing packet {packet:?}");
                                 router.process(packet).await?;
                                 state = PIPOState::AwaitHeader;
                             },
