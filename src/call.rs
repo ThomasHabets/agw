@@ -3,7 +3,7 @@ use crate::{Error, Result};
 /// Callsign, including SSID.
 ///
 /// Max length is 10, because that's the max length in the AGW protocol.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Call {
     bytes: [u8; 10],
 }

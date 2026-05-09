@@ -9,7 +9,7 @@ const CMD_REGISTER_CALLSIGN: u8 = b'X';
 const CMD_DATA: u8 = b'D';
 
 /// Port number.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Port(pub u8);
 
 /// PID number.

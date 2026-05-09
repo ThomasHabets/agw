@@ -1,3 +1,6 @@
+// TODO: This code was a bit hastily written. With the benefit of hindsight it
+// should be restructured with a more though through design.
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
@@ -47,6 +50,36 @@ pub enum RuleMatch {
     IncomingConnect { port: Port, dst: Call },
 }
 
+/// 3-tuple for a connection.
+///
+/// We treat a duplicate `IncomingConnect` for the same `(port, local, remote)`
+/// as "the UA was lost, replay server-side startup data", not as a new
+/// connection.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ServerConnectionKey {
+    port: Port,
+    local: Call,
+    remote: Call,
+}
+
+/// We initially need some state for a connection in case the UA gets lost and
+/// we need to re-send it.
+///
+/// This is shared between the router and the accepted `Connection`: the router
+/// needs to find and replay buffered packets when a duplicate
+/// `IncomingConnect` arrives, while the `Connection` needs to append sent
+/// packets and mark the connection confirmed after the first client data
+/// frame.
+#[derive(Default)]
+struct ServerConnectionState {
+    confirmed: bool,
+    buffered: Vec<Packet>,
+}
+
+// This has to be an `Arc` because the router and the accepted connection live
+// independently, but both need to mutate the same confirmation / replay state.
+type SharedServerConnectionState = Arc<Mutex<ServerConnectionState>>;
+
 #[derive(Clone)]
 pub struct Rule {
     ident: RuleIdent,
@@ -56,7 +89,10 @@ pub struct Rule {
 
 #[derive(Clone)]
 enum RuleSink {
-    Packet(mpsc::Sender<Packet>),
+    Packet {
+        tx: mpsc::Sender<Packet>,
+        server_state: Option<SharedServerConnectionState>,
+    },
     Listener(mpsc::Sender<PendingConnection>),
 }
 
@@ -108,8 +144,17 @@ impl RuleMatch {
     }
 }
 
+/// All packets from Pipo go to the router, which has "rules" about which
+/// packets will go where.
 pub struct Router {
     ident: Mutex<RuleIdent>,
+    // This needs cleaning up. It only allows one AGW "upstream". Do we want
+    // that?
+    outgoing: Mutex<Option<mpsc::Sender<Packet>>>,
+    // Track accepted inbound connections by AX.25 tuple so a duplicate SABM /
+    // `IncomingConnect` can find the existing connection and trigger a replay
+    // of any server data sent before the client proved it received the UA.
+    server_connections: Mutex<HashMap<ServerConnectionKey, Weak<Mutex<ServerConnectionState>>>>,
     rules: Arc<Mutex<Vec<Rule>>>,
 }
 
@@ -118,11 +163,48 @@ impl Router {
     pub fn new() -> Router {
         Self {
             ident: Mutex::new(0),
+            outgoing: Mutex::new(None),
+            server_connections: Mutex::new(HashMap::new()),
             rules: Arc::new(Mutex::new(Vec::new())),
         }
     }
+    /// Add packet listener. When a packet matches the rules, send it on the
+    /// mpsc.
     pub fn add(self: &Arc<Self>, m: RuleMatch, tx: mpsc::Sender<Packet>) -> RuleHandle {
-        self.add_inner(m, RuleSink::Packet(tx))
+        self.add_inner(
+            m,
+            RuleSink::Packet {
+                tx,
+                server_state: None,
+            },
+        )
+    }
+    fn add_server_connection(
+        &self,
+        key: &ServerConnectionKey,
+        src: Call,
+        dst: Call,
+        tx: mpsc::Sender<Packet>,
+        server_state: SharedServerConnectionState,
+    ) -> RuleHandle {
+        // Store only a `Weak` here so dropping the accepted connection is
+        // enough to let this bookkeeping disappear without an explicit cleanup
+        // path.
+        self.server_connections
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Arc::downgrade(&server_state));
+        self.add_inner(
+            RuleMatch::Data {
+                port: key.port,
+                src,
+                dst,
+            },
+            RuleSink::Packet {
+                tx,
+                server_state: Some(server_state),
+            },
+        )
     }
     fn add_incoming_listener(
         &self,
@@ -134,6 +216,35 @@ impl Router {
             RuleMatch::IncomingConnect { port, dst },
             RuleSink::Listener(tx),
         )
+    }
+    fn set_outgoing(&self, tx: mpsc::Sender<Packet>) -> Result<()> {
+        let mut guard = self.outgoing.lock().unwrap();
+        if guard.is_some() {
+            return Err(Error::msg(
+                "outgoing path already set. Tried to set a second time",
+            ));
+        }
+        *guard = Some(tx);
+        Ok(())
+    }
+    fn outgoing(&self) -> Result<mpsc::Sender<Packet>> {
+        self.outgoing
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(Error::msg("router outgoing sender not configured"))
+    }
+    fn get_server_connection(
+        &self,
+        key: &ServerConnectionKey,
+    ) -> Option<SharedServerConnectionState> {
+        let mut server_connections = self.server_connections.lock().unwrap();
+        if let Some(state) = server_connections.get(key).and_then(Weak::upgrade) {
+            Some(state)
+        } else {
+            server_connections.remove(key);
+            None
+        }
     }
     fn add_inner(&self, m: RuleMatch, sink: RuleSink) -> RuleHandle {
         let ident = {
@@ -165,7 +276,14 @@ impl Router {
         for rule in &rules {
             if rule.m.matches(&packet) {
                 match &rule.sink {
-                    RuleSink::Packet(tx) => {
+                    RuleSink::Packet { tx, server_state } => {
+                        if matches!(packet, Packet::Data { .. }) {
+                            if let Some(server_state) = server_state {
+                                let mut server_state = server_state.lock().unwrap();
+                                server_state.confirmed = true;
+                                server_state.buffered.clear();
+                            }
+                        }
                         tx.send(packet.clone()).await.map_err(Error::other)?;
                     }
                     RuleSink::Listener(tx) => {
@@ -178,14 +296,41 @@ impl Router {
                         else {
                             continue;
                         };
+                        let key = ServerConnectionKey {
+                            port: *port,
+                            local: dst.clone(),
+                            remote: src.clone(),
+                        };
+                        if let Some(server_state) = self.get_server_connection(&key) {
+                            // This is a retransmitted SABM for an already
+                            // accepted inbound connection. Until we see any
+                            // client data, the client may not have received
+                            // our UA, so replay the server's early data.
+                            let buffered = {
+                                let server_state = server_state.lock().unwrap();
+                                if server_state.confirmed {
+                                    Vec::new()
+                                } else {
+                                    server_state.buffered.clone()
+                                }
+                            };
+                            if !buffered.is_empty() {
+                                let outgoing = self.outgoing()?;
+                                for packet in buffered {
+                                    outgoing.send(packet).await.map_err(Error::other)?;
+                                }
+                            }
+                            any = true;
+                            continue;
+                        }
                         let (txd, rxd) = mpsc::channel(10); // TODO: magic number.
-                        let rule_handle = self.add_inner(
-                            RuleMatch::Data {
-                                port: *port,
-                                src: src.clone(),
-                                dst: dst.clone(),
-                            },
-                            RuleSink::Packet(txd),
+                        let server_state = Arc::new(Mutex::new(ServerConnectionState::default()));
+                        let rule_handle = self.add_server_connection(
+                            &key,
+                            src.clone(),
+                            dst.clone(),
+                            txd,
+                            server_state.clone(),
                         );
                         tx.send(PendingConnection {
                             port: *port,
@@ -194,6 +339,7 @@ impl Router {
                             dst: src.clone(),
                             rule_handle,
                             rx: rxd,
+                            server_state,
                         })
                         .await
                         .map_err(Error::other)?;
@@ -216,6 +362,8 @@ impl Default for Router {
 }
 
 /// Packet in, packet out.
+///
+/// This is the gateway between the AGW TCP stream and the `Router`.
 struct Pipo {
     tx: mpsc::Sender<Packet>,
     //rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
@@ -227,18 +375,21 @@ enum PIPOState {
 }
 
 impl Pipo {
-    fn new(con: TcpStream, router: Arc<Router>) -> Self {
+    fn new(con: TcpStream, router: Arc<Router>) -> Result<Self> {
         //let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
         let (tx2, rx2) = mpsc::channel(10); // TODO: magic number.
+        router.set_outgoing(tx2.clone())?;
+
+        // TODO: probably should split this task in two.
         tokio::spawn(async move {
             Self::run(con, router, rx2)
                 .await
                 .expect("Pipo run() failed");
         });
-        Pipo {
+        Ok(Pipo {
             tx: tx2,
             //rx: tokio::sync::Mutex::new(rx1),
-        }
+        })
     }
     async fn send(&self, packet: Packet) -> Result<()> {
         self.tx.send(packet).await.map_err(Error::other)
@@ -317,7 +468,7 @@ impl AGW {
         let router = Arc::new(Router::new());
         let r2 = router.clone();
         Ok(Self {
-            con: Pipo::new(TcpStream::connect(addr).await?, r2),
+            con: Pipo::new(TcpStream::connect(addr).await?, r2)?,
             router,
         })
     }
@@ -361,6 +512,7 @@ impl AGW {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_connection(
         &self,
         port: Port,
@@ -369,6 +521,7 @@ impl AGW {
         dst: Call,
         rule_handle: RuleHandle,
         rx: mpsc::Receiver<Packet>,
+        server_state: Option<SharedServerConnectionState>,
     ) -> Connection<'_> {
         Connection {
             connect_string: "TODO".to_string(),
@@ -379,6 +532,7 @@ impl AGW {
             agw: self,
             _rule_handle: rule_handle,
             rx,
+            server_state,
             read_buf: vec![],
             pending_write: None,
             pending_shutdown: None,
@@ -450,7 +604,15 @@ impl AGW {
                 dst: _,
             } => {
                 trace!("agw: Connection established!");
-                Ok(self.make_connection(port, pid, src.clone(), dst.clone(), rule_handle, rxd))
+                Ok(self.make_connection(
+                    port,
+                    pid,
+                    src.clone(),
+                    dst.clone(),
+                    rule_handle,
+                    rxd,
+                    None,
+                ))
             }
             other => {
                 panic!("received unexpected packet: {other:?}")
@@ -483,6 +645,7 @@ impl<'a> Listener<'a> {
             pending.dst,
             pending.rule_handle,
             pending.rx,
+            Some(pending.server_state),
         ))
     }
 }
@@ -494,6 +657,7 @@ struct PendingConnection {
     dst: Call,
     rule_handle: RuleHandle,
     rx: mpsc::Receiver<Packet>,
+    server_state: SharedServerConnectionState,
 }
 
 /// AX.25 connection object.
@@ -509,6 +673,7 @@ pub struct Connection<'a> {
     disconnected: bool,
     _rule_handle: RuleHandle,
     rx: mpsc::Receiver<Packet>,
+    server_state: Option<SharedServerConnectionState>,
     read_buf: Vec<u8>,
     pending_write: Option<PendingWrite>,
     pending_shutdown: Option<PendingSend>,
@@ -558,7 +723,9 @@ impl Connection<'_> {
             return Err(Error::msg("connection disconnected"));
         }
         let packet = self.data_packet(data.to_vec());
-        self.agw.send(packet).await
+        self.agw.send(packet.clone()).await?;
+        self.buffer_server_data(&packet);
+        Ok(())
     }
 
     fn data_packet(&self, data: Vec<u8>) -> Packet {
@@ -585,6 +752,22 @@ impl Connection<'_> {
         Box::pin(async move { tx.send(packet).await })
     }
 
+    // Only accepted inbound connections participate in the replay logic.
+    // Outbound connections and already-confirmed inbound ones leave this as a
+    // no-op.
+    fn buffer_server_data(&self, packet: &Packet) {
+        let Some(server_state) = &self.server_state else {
+            return;
+        };
+        if !matches!(packet, Packet::Data { .. }) {
+            return;
+        }
+        let mut server_state = server_state.lock().unwrap();
+        if !server_state.confirmed {
+            server_state.buffered.push(packet.clone());
+        }
+    }
+
     fn drain_read_buf(&mut self, buf: &mut ReadBuf<'_>) {
         let n = buf.remaining().min(self.read_buf.len());
         buf.put_slice(&self.read_buf[..n]);
@@ -598,7 +781,9 @@ impl Connection<'_> {
         match pending.fut.as_mut().poll(cx) {
             Poll::Ready(Ok(())) => {
                 let len = pending.len;
+                let packet = pending.packet.clone();
                 self.pending_write = None;
+                self.buffer_server_data(&packet);
                 Poll::Ready(Ok(len))
             }
             Poll::Ready(Err(e)) => {
@@ -641,6 +826,7 @@ type PendingSend =
 
 struct PendingWrite {
     len: usize,
+    packet: Packet,
     fut: PendingSend,
 }
 
@@ -717,9 +903,11 @@ impl AsyncWrite for Connection<'_> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        let packet = this.data_packet(buf.to_vec());
         this.pending_write = Some(PendingWrite {
             len: buf.len(),
-            fut: this.send_future(this.data_packet(buf.to_vec())),
+            packet: packet.clone(),
+            fut: this.send_future(packet),
         });
         this.poll_pending_write(cx)
     }
