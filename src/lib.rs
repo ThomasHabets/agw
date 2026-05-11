@@ -22,9 +22,6 @@ pub mod v2;
 pub mod r#async;
 pub mod proxy;
 
-#[cfg(feature = "native")]
-pub mod native;
-
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
     /// An error with only a plain text message.
