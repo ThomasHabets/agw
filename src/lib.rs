@@ -13,9 +13,6 @@ pub use call::Call;
 pub use header::{Header, HEADER_LEN};
 pub use packet::{Packet, Pid, Port};
 
-#[cfg(feature = "crypto")]
-pub mod crypto;
-
 pub mod wrap;
 
 mod v1;

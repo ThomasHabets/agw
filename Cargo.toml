@@ -21,7 +21,6 @@ regex = "1.12.3"
 cc = "1.1.7"
 
 [features]
-crypto=[]
 native=[]
 
 [dev-dependencies]
