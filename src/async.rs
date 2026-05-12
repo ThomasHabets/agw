@@ -453,6 +453,89 @@ impl Pipo {
     }
 }
 
+/// Packet-oriented AGW server-side connection wrapper.
+///
+/// This is intended for code that is implementing an AGW server rather than
+/// talking to one. It does not spawn background tasks or route packets to
+/// per-connection objects; it simply reads and writes `Packet` values on a
+/// single accepted TCP stream.
+pub struct AGWServer {
+    con: TcpStream,
+}
+
+impl AGWServer {
+    /// Wrap an accepted AGW TCP connection.
+    #[must_use]
+    pub fn new(con: TcpStream) -> Self {
+        Self { con }
+    }
+
+    /// Return the peer socket address.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying socket query fails.
+    pub fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.con.peer_addr()
+    }
+
+    /// Return the local socket address.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying socket query fails.
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.con.local_addr()
+    }
+
+    /// Borrow the underlying TCP stream.
+    #[must_use]
+    pub fn get_ref(&self) -> &TcpStream {
+        &self.con
+    }
+
+    /// Mutably borrow the underlying TCP stream.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut TcpStream {
+        &mut self.con
+    }
+
+    /// Consume the wrapper and return the underlying TCP stream.
+    #[must_use]
+    pub fn into_inner(self) -> TcpStream {
+        self.con
+    }
+
+    /// Receive the next AGW packet from the client.
+    ///
+    /// # Errors
+    ///
+    /// If the TCP stream fails or the AGW packet is malformed.
+    pub async fn recv(&mut self) -> Result<Packet> {
+        let mut header = [0_u8; HEADER_LEN];
+        self.con.read_exact(&mut header).await?;
+        let header = parse_header(&header)?;
+        let payload = if header.data_len > 0 {
+            let mut payload = vec![0; header.data_len as usize];
+            self.con.read_exact(&mut payload).await?;
+            payload
+        } else {
+            Vec::new()
+        };
+        Packet::parse(&header, &payload)
+    }
+
+    /// Send an AGW packet to the client.
+    ///
+    /// # Errors
+    ///
+    /// If the TCP stream fails.
+    pub async fn send(&mut self, packet: &Packet) -> Result<()> {
+        self.con.write_all(&packet.serialize()).await?;
+        Ok(())
+    }
+}
+
 pub struct AGW {
     con: Pipo,
     router: Arc<Router>,
