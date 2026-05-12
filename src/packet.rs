@@ -3,10 +3,17 @@ use log::{debug, trace};
 use crate::{Call, Header};
 use crate::{Error, Result};
 
+const CMD_VERSION: u8 = b'R';
+const CMD_FRAMES_OUTSTANDING_PORT: u8 = b'y';
 const CMD_CONNECT: u8 = b'C';
+const CMD_CONNECT_VIA: u8 = b'v';
 const CMD_DISCONNECT: u8 = b'd';
 const CMD_REGISTER_CALLSIGN: u8 = b'X';
 const CMD_DATA: u8 = b'D';
+const CMD_UNPROTO: u8 = b'M';
+const CMD_PORT_INFO: u8 = b'G';
+const CMD_CALLSIGN_HEARD: u8 = b'H';
+const CMD_PORT_CAP: u8 = b'g';
 
 /// Port number.
 #[derive(Copy, Clone, Debug, PartialEq, Hash, Eq)]
@@ -102,12 +109,14 @@ impl Packet {
     #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         match self {
-            Packet::VersionQuery => Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
+            Packet::VersionQuery => {
+                Header::new(Port(0), CMD_VERSION, Pid(0), None, None, 0).serialize()
+            }
             Packet::FramesOutstandingPortQuery(port) => {
-                Header::new(*port, b'y', Pid(0), None, None, 0).serialize()
+                Header::new(*port, CMD_FRAMES_OUTSTANDING_PORT, Pid(0), None, None, 0).serialize()
             }
             Packet::FramesOutstandingPortReply(port, n) => [
-                Header::new(*port, b'y', Pid(0), None, None, 4).serialize(),
+                Header::new(*port, CMD_FRAMES_OUTSTANDING_PORT, Pid(0), None, None, 4).serialize(),
                 u32::try_from(*n)
                     .expect("can't happen. Has to fit")
                     .to_le_bytes()
@@ -126,7 +135,15 @@ impl Packet {
                     0,
                 ];
                 [
-                    Header::new(Port(0), b'R', Pid(0), None, None, 0).serialize(),
+                    Header::new(
+                        Port(0),
+                        CMD_VERSION,
+                        Pid(0),
+                        None,
+                        None,
+                        u32::try_from(data.len()).expect("can't happen"),
+                    )
+                    .serialize(),
                     data,
                 ]
                 .concat()
@@ -145,7 +162,20 @@ impl Packet {
                 src,
                 dst,
             } => [
-                Header::new(*port, b'C', *pid, Some(src.clone()), Some(dst.clone()), 0).serialize(),
+                Header::new(
+                    *port,
+                    CMD_CONNECT,
+                    *pid,
+                    Some(src.clone()),
+                    Some(dst.clone()),
+                    u32::try_from(
+                        format!("*** CONNECTED To Station {}", src.as_str())
+                            .as_bytes()
+                            .len(),
+                    )
+                    .expect("can't happen"),
+                )
+                .serialize(),
                 format!("*** CONNECTED To Station {}", src.as_str())
                     .as_bytes()
                     .to_vec(),
@@ -157,7 +187,20 @@ impl Packet {
                 src,
                 dst,
             } => [
-                Header::new(*port, b'C', *pid, Some(src.clone()), Some(dst.clone()), 0).serialize(),
+                Header::new(
+                    *port,
+                    CMD_CONNECT,
+                    *pid,
+                    Some(src.clone()),
+                    Some(dst.clone()),
+                    u32::try_from(
+                        format!("*** CONNECTED With Station {}", src.as_str())
+                            .as_bytes()
+                            .len(),
+                    )
+                    .expect("can't happen"),
+                )
+                .serialize(),
                 format!("*** CONNECTED With Station {}", src.as_str())
                     .as_bytes()
                     .to_vec(),
@@ -170,8 +213,6 @@ impl Packet {
                 dst,
                 via,
             } => {
-                let h = Header::new(*port, b'v', *pid, Some(src.clone()), Some(dst.clone()), 0)
-                    .serialize();
                 /*
                 const MAX_HOPS: usize = 7;
                 if via.len() > MAX_HOPS {
@@ -186,6 +227,15 @@ impl Packet {
                 for call in via {
                     hops.extend_from_slice(call.as_bytes());
                 }
+                let h = Header::new(
+                    *port,
+                    CMD_CONNECT_VIA,
+                    *pid,
+                    Some(src.clone()),
+                    Some(dst.clone()),
+                    u32::try_from(hops.len()).expect("TODO: error or something"),
+                )
+                .serialize();
                 [h, hops.clone()].concat()
             }
             Packet::RegisterCallsign(port, src) => Header::new(
@@ -242,7 +292,7 @@ impl Packet {
             } => [
                 Header::new(
                     *port,
-                    b'M',
+                    CMD_UNPROTO,
                     *pid,
                     Some(src.clone()),
                     Some(dst.clone()),
@@ -252,41 +302,45 @@ impl Packet {
                 data.clone(),
             ]
             .concat(),
-            Packet::PortInfoQuery => Header::new(Port(0), b'G', Pid(0), None, None, 0).serialize(),
+            Packet::PortInfoQuery => {
+                Header::new(Port(0), CMD_PORT_INFO, Pid(0), None, None, 0).serialize()
+            }
             Packet::CallsignHeardQuery(port) => {
-                Header::new(*port, b'H', Pid(0), None, None, 0).serialize()
+                Header::new(*port, CMD_CALLSIGN_HEARD, Pid(0), None, None, 0).serialize()
             }
             Packet::PortCapQuery(port) => {
-                Header::new(*port, b'g', Pid(0), None, None, 0).serialize()
+                Header::new(*port, CMD_PORT_CAP, Pid(0), None, None, 0).serialize()
             }
         }
     }
+    #[allow(clippy::too_many_lines)]
     pub fn parse(header: &Header, data: &[u8]) -> Result<Packet> {
         Ok(match header.data_kind {
-            b'R' => {
-                if data.len() != 8 {
+            CMD_VERSION => {
+                if data.is_empty() {
+                    Packet::VersionQuery
+                } else if data.len() == 8 {
+                    #[allow(clippy::missing_panics_doc)]
+                    let major = u16::from_le_bytes(
+                        data[0..2]
+                            .try_into()
+                            .expect("can't happen: two bytes can't be made into u16?"),
+                    );
+                    #[allow(clippy::missing_panics_doc)]
+                    let minor = u16::from_le_bytes(
+                        data[4..6]
+                            .try_into()
+                            .expect("can't happen: two bytes can't be made into u16?"),
+                    );
+                    Packet::VersionReply { major, minor }
+                } else {
                     return Err(Error::msg(format!(
                         "version packet had wrong length {}, {data:?}",
                         header.data_kind
                     )));
                 }
-
-                #[allow(clippy::missing_panics_doc)]
-                let major = u16::from_le_bytes(
-                    data[0..2]
-                        .try_into()
-                        .expect("can't happen: two bytes can't be made into u16?"),
-                );
-                #[allow(clippy::missing_panics_doc)]
-                let minor = u16::from_le_bytes(
-                    data[4..6]
-                        .try_into()
-                        .expect("can't happen: two bytes can't be made into u16?"),
-                );
-                Packet::VersionReply { major, minor }
             }
             CMD_CONNECT => {
-                let s = String::from_utf8(data.to_vec()).map_err(Error::other)?;
                 let src = header
                     .src
                     .clone()
@@ -295,26 +349,69 @@ impl Packet {
                     .dst
                     .clone()
                     .ok_or(Error::msg("connect missing src"))?;
-                if s.starts_with("*** CONNECTED WITH")
-                    || s.starts_with("*** CONNECTED With Station ")
-                {
-                    debug!("agw: Got ConnectionEstablished {s}");
-                    Packet::ConnectionEstablished {
+                if data.is_empty() {
+                    debug!("agw: Got Connect {src:?} to {dst:?}");
+                    Packet::Connect {
                         port: header.port,
                         pid: header.pid,
-                        src: src.clone(),
-                        dst: dst.clone(),
-                    }
-                } else if s.starts_with("*** CONNECTED To Station") {
-                    debug!("agw: Got IncomingConnect {s}");
-                    Packet::IncomingConnect {
-                        port: header.port,
-                        pid: header.pid,
-                        src: src.clone(),
-                        dst: dst.clone(),
+                        src,
+                        dst,
                     }
                 } else {
-                    return Err(Error::msg(format!("unknown C {s}")));
+                    let s = String::from_utf8(data.to_vec()).map_err(Error::other)?;
+                    if s.starts_with("*** CONNECTED WITH")
+                        || s.starts_with("*** CONNECTED With Station ")
+                    {
+                        debug!("agw: Got ConnectionEstablished {s}");
+                        Packet::ConnectionEstablished {
+                            port: header.port,
+                            pid: header.pid,
+                            src,
+                            dst,
+                        }
+                    } else if s.starts_with("*** CONNECTED To Station") {
+                        debug!("agw: Got IncomingConnect {s}");
+                        Packet::IncomingConnect {
+                            port: header.port,
+                            pid: header.pid,
+                            src,
+                            dst,
+                        }
+                    } else {
+                        return Err(Error::msg(format!("unknown C {s}")));
+                    }
+                }
+            }
+            CMD_CONNECT_VIA => {
+                let src = header
+                    .src
+                    .clone()
+                    .ok_or(Error::msg("connect via missing src"))?;
+                let dst = header
+                    .dst
+                    .clone()
+                    .ok_or(Error::msg("connect via missing dst"))?;
+                let Some(&nhops) = data.first() else {
+                    return Err(Error::msg("connect via missing hop count"));
+                };
+                let expected = 1 + usize::from(nhops) * 10;
+                if data.len() != expected {
+                    return Err(Error::msg(format!(
+                        "connect via had wrong length {} != {expected}",
+                        data.len()
+                    )));
+                }
+                let mut via = Vec::with_capacity(usize::from(nhops));
+                for chunk in data[1..].chunks_exact(10) {
+                    via.push(Call::from_bytes(chunk)?);
+                }
+                debug!("agw: Got ConnectVia from {src:?} to {dst:?} via {via:?}");
+                Packet::ConnectVia {
+                    port: header.port,
+                    pid: header.pid,
+                    src,
+                    dst,
+                    via,
                 }
             }
             CMD_DISCONNECT => Packet::Disconnect {
@@ -328,6 +425,19 @@ impl Packet {
                     .dst
                     .clone()
                     .ok_or(Error::msg("disconnect missing dst"))?,
+            },
+            CMD_UNPROTO => Packet::Unproto {
+                port: header.port,
+                pid: header.pid,
+                src: header
+                    .src
+                    .clone()
+                    .ok_or(Error::msg("unproto with missing src"))?,
+                dst: header
+                    .dst
+                    .clone()
+                    .ok_or(Error::msg("unproto with missing dst"))?,
+                data: data.to_vec(),
             },
             CMD_DATA => Packet::Data {
                 port: header.port,
@@ -349,6 +459,48 @@ impl Packet {
                     .clone()
                     .ok_or(Error::msg("data with missing src"))?,
             ),
+            CMD_FRAMES_OUTSTANDING_PORT => {
+                if data.is_empty() {
+                    Packet::FramesOutstandingPortQuery(header.port)
+                } else if data.len() == 4 {
+                    Packet::FramesOutstandingPortReply(
+                        header.port,
+                        usize::try_from(u32::from_le_bytes(
+                            data.try_into().expect("can't happen: bytes to u32"),
+                        ))
+                        .expect("TODO: some error"),
+                    )
+                } else {
+                    return Err(Error::msg(format!(
+                        "frames outstanding packet had wrong length {}, {data:?}",
+                        data.len()
+                    )));
+                }
+            }
+            CMD_PORT_INFO => {
+                if !data.is_empty() {
+                    return Err(Error::msg(format!(
+                        "port info query had unexpected data {data:?}",
+                    )));
+                }
+                Packet::PortInfoQuery
+            }
+            CMD_CALLSIGN_HEARD => {
+                if !data.is_empty() {
+                    return Err(Error::msg(format!(
+                        "callsign heard query had unexpected data {data:?}",
+                    )));
+                }
+                Packet::CallsignHeardQuery(header.port)
+            }
+            CMD_PORT_CAP => {
+                if !data.is_empty() {
+                    return Err(Error::msg(format!(
+                        "port cap query had unexpected data {data:?}",
+                    )));
+                }
+                Packet::PortCapQuery(header.port)
+            }
             _ => {
                 return Err(Error::msg(format!(
                     "unknown packet kind {}",
