@@ -2,6 +2,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::linkedlist)]
+#![allow(clippy::similar_names)]
 #![doc = include_str!("../README.md")]
 
 use std::sync::Arc;

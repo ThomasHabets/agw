@@ -1,5 +1,7 @@
 use log::{debug, trace};
+use std::fmt::Write;
 
+use crate::v1::{Baud, PortCaps, PortInfo, PortsInfo};
 use crate::{Call, Header};
 use crate::{Error, Result};
 
@@ -40,14 +42,41 @@ pub enum Packet {
         minor: u16,
     },
 
+    /// AGWPE: Callsign registration reply.
+    RegisterCallsignReply {
+        port: Port,
+        call: Call,
+        success: bool,
+    },
+
     /// Application: Port capability query.
     PortCapQuery(Port),
+
+    /// AGWPE: Port capability reply.
+    PortCapReply {
+        port: Port,
+        caps: PortCaps,
+    },
 
     /// Application: List heard callsigns.
     CallsignHeardQuery(Port),
 
+    /// AGWPE: Callsigns heard reply.
+    ///
+    /// The full AGW payload includes timestamps the crate does not currently
+    /// model, so this keeps the raw payload bytes. For an empty heard list,
+    /// send a single trailing NUL byte: `vec![0]`.
+    CallsignHeardReply {
+        port: Port,
+        data: Vec<u8>,
+    },
+
     /// Application: Port info query.
     PortInfoQuery,
+
+    /// AGWPE: Port info reply.
+    PortInfoReply(PortsInfo),
+
     RegisterCallsign(Port, Call),
     Connect {
         port: Port,
@@ -148,6 +177,23 @@ impl Packet {
                 ]
                 .concat()
             }
+            Packet::RegisterCallsignReply {
+                port,
+                call,
+                success,
+            } => [
+                Header::new(
+                    *port,
+                    CMD_REGISTER_CALLSIGN,
+                    Pid(0),
+                    Some(call.clone()),
+                    None,
+                    1,
+                )
+                .serialize(),
+                vec![u8::from(*success)],
+            ]
+            .concat(),
             Packet::Connect {
                 port,
                 pid,
@@ -305,12 +351,66 @@ impl Packet {
             Packet::PortInfoQuery => {
                 Header::new(Port(0), CMD_PORT_INFO, Pid(0), None, None, 0).serialize()
             }
+            Packet::PortInfoReply(info) => {
+                let mut payload = format!("{};", info.count);
+                for port in &info.ports {
+                    let _ = write!(payload, "Port{} {};", port.port.0, port.descr);
+                }
+                payload.push('\0');
+                [
+                    Header::new(
+                        Port(0),
+                        CMD_PORT_INFO,
+                        Pid(0),
+                        None,
+                        None,
+                        u32::try_from(payload.len()).expect("can't happen"),
+                    )
+                    .serialize(),
+                    payload.into_bytes(),
+                ]
+                .concat()
+            }
             Packet::CallsignHeardQuery(port) => {
                 Header::new(*port, CMD_CALLSIGN_HEARD, Pid(0), None, None, 0).serialize()
             }
+            Packet::CallsignHeardReply { port, data } => [
+                Header::new(
+                    *port,
+                    CMD_CALLSIGN_HEARD,
+                    Pid(0),
+                    None,
+                    None,
+                    u32::try_from(data.len()).expect("can't happen"),
+                )
+                .serialize(),
+                data.clone(),
+            ]
+            .concat(),
             Packet::PortCapQuery(port) => {
                 Header::new(*port, CMD_PORT_CAP, Pid(0), None, None, 0).serialize()
             }
+            Packet::PortCapReply { port, caps } => [
+                Header::new(*port, CMD_PORT_CAP, Pid(0), None, None, 12).serialize(),
+                vec![
+                    match caps.rate {
+                        Baud::Unknown => 0xff,
+                        Baud::B1200 => 0,
+                        Baud::B2400 => 1,
+                        Baud::B4800 => 2,
+                        Baud::B9600 => 3,
+                    },
+                    caps.traffic_level.unwrap_or(0xff),
+                    caps.tx_delay,
+                    caps.tx_tail,
+                    caps.persist,
+                    caps.slot_time,
+                    caps.max_frame,
+                    caps.active_connections,
+                ],
+                caps.bytes_per_2min.to_le_bytes().to_vec(),
+            ]
+            .concat(),
         }
     }
     #[allow(clippy::too_many_lines)]
@@ -452,13 +552,26 @@ impl Packet {
                     .ok_or(Error::msg("data with missing dst"))?,
                 data: data.to_vec(),
             },
-            CMD_REGISTER_CALLSIGN => Packet::RegisterCallsign(
-                header.port,
-                header
+            CMD_REGISTER_CALLSIGN => {
+                let call = header
                     .src
                     .clone()
-                    .ok_or(Error::msg("data with missing src"))?,
-            ),
+                    .ok_or(Error::msg("callsign packet missing src"))?;
+                if data.is_empty() {
+                    Packet::RegisterCallsign(header.port, call)
+                } else if data.len() == 1 {
+                    Packet::RegisterCallsignReply {
+                        port: header.port,
+                        call,
+                        success: data[0] != 0,
+                    }
+                } else {
+                    return Err(Error::msg(format!(
+                        "callsign registration packet had wrong length {}, {data:?}",
+                        data.len()
+                    )));
+                }
+            }
             CMD_FRAMES_OUTSTANDING_PORT => {
                 if data.is_empty() {
                     Packet::FramesOutstandingPortQuery(header.port)
@@ -478,28 +591,82 @@ impl Packet {
                 }
             }
             CMD_PORT_INFO => {
-                if !data.is_empty() {
-                    return Err(Error::msg(format!(
-                        "port info query had unexpected data {data:?}",
-                    )));
+                if data.is_empty() {
+                    Packet::PortInfoQuery
+                } else {
+                    let s = std::str::from_utf8(data).map_err(Error::other)?;
+                    let mut parts = s.splitn(2, ';');
+                    let count = parts
+                        .next()
+                        .ok_or(Error::msg("port info reply missing count"))?
+                        .parse()
+                        .map_err(Error::other)?;
+                    let ports = parts
+                        .next()
+                        .ok_or(Error::msg("port info reply missing ports"))?
+                        .split(';')
+                        .map(std::string::ToString::to_string)
+                        .filter(|s| !s.is_empty() && s != "\0")
+                        .map(|entry| {
+                            let entry = entry.trim_end_matches('\0');
+                            let rest = entry
+                                .strip_prefix("Port")
+                                .ok_or(Error::msg(format!("bad port line {entry:?}")))?;
+                            let split = rest
+                                .find(char::is_whitespace)
+                                .ok_or(Error::msg(format!("bad port line {entry:?}")))?;
+                            let port = Port(rest[..split].parse().map_err(Error::other)?);
+                            Ok::<_, Error>(PortInfo {
+                                port,
+                                descr: rest[split..].trim_start().to_string(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Packet::PortInfoReply(PortsInfo { count, ports })
                 }
-                Packet::PortInfoQuery
             }
             CMD_CALLSIGN_HEARD => {
-                if !data.is_empty() {
-                    return Err(Error::msg(format!(
-                        "callsign heard query had unexpected data {data:?}",
-                    )));
+                if data.is_empty() {
+                    Packet::CallsignHeardQuery(header.port)
+                } else {
+                    Packet::CallsignHeardReply {
+                        port: header.port,
+                        data: data.to_vec(),
+                    }
                 }
-                Packet::CallsignHeardQuery(header.port)
             }
             CMD_PORT_CAP => {
-                if !data.is_empty() {
+                if data.is_empty() {
+                    Packet::PortCapQuery(header.port)
+                } else if data.len() == 12 {
+                    Packet::PortCapReply {
+                        port: header.port,
+                        caps: PortCaps {
+                            rate: match data[0] {
+                                0 => Baud::B1200,
+                                1 => Baud::B2400,
+                                2 => Baud::B4800,
+                                3 => Baud::B9600,
+                                _ => Baud::Unknown,
+                            },
+                            traffic_level: if data[1] == 0xff { None } else { Some(data[1]) },
+                            tx_delay: data[2],
+                            tx_tail: data[3],
+                            persist: data[4],
+                            slot_time: data[5],
+                            max_frame: data[6],
+                            active_connections: data[7],
+                            bytes_per_2min: u32::from_le_bytes(
+                                data[8..12].try_into().expect("can't happen: bytes to u32"),
+                            ),
+                        },
+                    }
+                } else {
                     return Err(Error::msg(format!(
-                        "port cap query had unexpected data {data:?}",
+                        "port cap reply had wrong length {}, {data:?}",
+                        data.len()
                     )));
                 }
-                Packet::PortCapQuery(header.port)
             }
             _ => {
                 return Err(Error::msg(format!(

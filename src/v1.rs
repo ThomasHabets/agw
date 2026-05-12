@@ -11,14 +11,14 @@ use crate::{Error, Result};
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
 /// Info about one port.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortInfo {
     pub port: Port,
     pub descr: String,
 }
 
 /// Info about all ports.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortsInfo {
     /// Number of ports.
     pub count: usize,
@@ -30,7 +30,7 @@ pub struct PortsInfo {
 /// Baud rate.
 ///
 /// Normally 1200 or 9600 for classic AX.25.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Baud {
     Unknown,
     B1200,
@@ -52,7 +52,7 @@ impl Baud {
 }
 
 /// Port capabilities.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortCaps {
     /// On air baud rate.
     pub rate: Baud,
@@ -77,7 +77,7 @@ pub struct PortCaps {
     pub bytes_per_2min: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallsignHeard {
     pub call: Call,
     // TODO: timestamps.
