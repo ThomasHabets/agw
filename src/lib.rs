@@ -14,8 +14,6 @@ pub use call::Call;
 pub use header::{Header, HEADER_LEN};
 pub use packet::{Packet, Pid, Port};
 
-pub mod wrap;
-
 mod v1;
 pub use v1::*;
 pub mod v2;
