@@ -83,9 +83,6 @@ impl AgwCon {
         self.txq_notify.notify_one();
         Ok(())
     }
-    fn flush(&self) -> Result<()> {
-        todo!()
-    }
     #[must_use]
     fn rx(self: &Arc<Self>) -> Reader {
         let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -188,7 +185,10 @@ impl Write for Connection {
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.parent.flush().map_err(std::io::Error::other)
+        // We always flush, because it goes over a channel.
+        //
+        // TODO: implement end to end flushing?
+        Ok(())
     }
 }
 
