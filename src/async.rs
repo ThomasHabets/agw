@@ -408,7 +408,7 @@ impl Pipo {
                 PIPOState::AwaitHeader => {
                     let mut header = [0_u8; HEADER_LEN];
                     tokio::select! {
-                    // TODO: what happens to partial reads?
+                    // TODO: fix partial reads.
                     ok = con.read_exact(&mut header) => {
                         ok?;
                         state = PIPOState::GotHeader(parse_header(&header)?);
@@ -425,6 +425,7 @@ impl Pipo {
                     if header.data_len > 0 {
                         let mut payload = vec![0; header.data_len as usize];
                         tokio::select! {
+                            // TODO: fix partial reads.
                             ok = con.read_exact(&mut payload) => {
                                 ok?;
                                 let packet = Packet::parse(header, &payload)?;
