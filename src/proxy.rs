@@ -111,7 +111,7 @@ impl ConnectionV2 {
         let txthread = std::thread::spawn(move || {
             for packet in txrx {
                 let bytes = packet.serialize();
-                let _ = wstream.write(&bytes)?;
+                wstream.write_all(&bytes)?;
                 debug!("agw: Send: {bytes:?}");
             }
             Ok(())
