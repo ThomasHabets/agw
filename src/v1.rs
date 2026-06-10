@@ -442,7 +442,10 @@ pub fn parse_header(header: &[u8; HEADER_LEN]) -> Result<Header> {
     let dst = Call::from_bytes(&header[18..28])?;
     let dst = if dst.is_empty() { None } else { Some(dst) };
     Ok(Header::new(
-        Port(header[0]),
+        // TODO: Port should presumably remain 0, or be None or something,
+        // if this is a Version query or some other non-port related packet
+        // type.
+        Port(header[0] + 1),
         header[4],
         Pid(header[6]),
         src,
