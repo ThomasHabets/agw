@@ -156,6 +156,12 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     // TODO: confirm data len, since most replies will have fixed size.
     Ok(match header.data_kind {
         b'R' => {
+            if data.len() != 8 {
+                return Err(Error::msg(format!(
+                    "bad Version packet length {}, want 8",
+                    data.len()
+                )));
+            }
             let major = u16::from_le_bytes(
                 data[0..2]
                     .try_into()
@@ -168,7 +174,15 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             );
             Reply::Version(major, minor)
         }
-        b'X' => Reply::CallsignRegistration(data[0] == 1),
+        b'X' => {
+            if data.len() != 1 {
+                return Err(Error::msg(format!(
+                    "bad CallsignRegistration length {}, want 1",
+                    data.len(),
+                )));
+            }
+            Reply::CallsignRegistration(data[0] == 1)
+        }
         b'C' => Reply::ConnectionEstablished(Connected {
             port: header.port,
             pid: header.pid,
@@ -228,6 +242,12 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             Reply::PortInfo(PortsInfo { count, ports })
         }
         b'g' => {
+            if data.len() != 12 {
+                return Err(Error::msg(format!(
+                    "bad PortCaps length {}, want 12",
+                    data.len()
+                )));
+            }
             let rate = data[0];
             let traffic_level = data[1];
             let tx_delay = data[2];
@@ -260,16 +280,32 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 },
             )
         }
-        b'y' => Reply::FramesOutstandingPort(
-            Port(header.port.0 + 1),
-            usize::try_from(u32::from_le_bytes(
+        b'y' => {
+            if data.len() != 4 {
+                return Err(Error::msg(format!(
+                    "bad FramesOutstdanding length {}, want 4",
+                    data.len()
+                )));
+            }
+            Reply::FramesOutstandingPort(
+                Port(header.port.0 + 1),
+                usize::try_from(u32::from_le_bytes(
+                    data[0..4].try_into().expect("can't happen: bytes to u32"),
+                ))
+                .expect("TODO: some error"),
+            )
+        }
+        b'Y' => {
+            if data.len() != 4 {
+                return Err(Error::msg(format!(
+                    "bad FramesOutstdandingConnection length {}, want 4",
+                    data.len()
+                )));
+            }
+            Reply::FramesOutstandingConnection(u32::from_le_bytes(
                 data[0..4].try_into().expect("can't happen: bytes to u32"),
             ))
-            .expect("TODO: some error"),
-        ),
-        b'Y' => Reply::FramesOutstandingConnection(u32::from_le_bytes(
-            data[0..4].try_into().expect("can't happen: bytes to u32"),
-        )),
+        }
         b'H' => Reply::CallsignHeard(
             Port(header.port.0 + 1),
             // TODO: implement parse.
