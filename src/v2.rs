@@ -196,7 +196,7 @@ impl Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if !self.buf.is_empty() {
             let n = buf.len().min(self.buf.len());
-            buf[..n].copy_from_slice(&self.buf);
+            buf[..n].copy_from_slice(&self.buf[..n]);
             self.buf.drain(..n);
             return Ok(n);
         }
