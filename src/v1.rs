@@ -558,8 +558,7 @@ impl AGW {
     fn writer(mut stream: TcpStream, rx: &mpsc::Receiver<Vec<u8>>) -> Result<()> {
         loop {
             let buf = rx.recv().map_err(Error::other)?;
-            // TODO: do full write.
-            let _ = stream.write(&buf).map_err(Error::other)?;
+            stream.write_all(&buf).map_err(Error::other)?;
         }
     }
 
