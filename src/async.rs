@@ -633,7 +633,7 @@ impl AGW {
         pid: Pid,
         src: &Call,
         dst: &Call,
-        _via: &[Call],
+        via: &[Call],
     ) -> Result<Connection<'a>> {
         let (tx, mut rx) = mpsc::channel(1);
 
@@ -658,16 +658,25 @@ impl AGW {
             txd,
         );
 
-        // Send connection establish.
-        if let Err(e) = self
-            .send(Packet::Connect {
+        let connect_packet = if via.is_empty() {
+            Packet::Connect {
                 port,
                 pid,
                 src: src.clone(),
                 dst: dst.clone(),
-            })
-            .await
-        {
+            }
+        } else {
+            Packet::ConnectVia {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+                via: via.to_vec(),
+            }
+        };
+
+        // Send connection establish.
+        if let Err(e) = self.send(connect_packet).await {
             return Err(Error::msg(format!("{e:?}")));
         }
 
