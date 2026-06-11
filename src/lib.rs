@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+const MAX_PAYLOAD_LEN: u32 = 1024 * 1024;
+
 mod call;
 mod header;
 mod packet;
@@ -72,3 +74,12 @@ impl Error {
 
 /// Result convenience type.
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn payload_len(data_len: u32) -> Result<usize> {
+    if data_len > MAX_PAYLOAD_LEN {
+        return Err(Error::msg(format!(
+            "packet payload too large: {data_len} > {MAX_PAYLOAD_LEN}"
+        )));
+    }
+    Ok(usize::try_from(data_len)?)
+}

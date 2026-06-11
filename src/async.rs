@@ -8,10 +8,13 @@ use std::task::{Context, Poll};
 
 use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::net::{
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
+    TcpStream,
+};
 use tokio::sync::mpsc;
 
-use crate::{parse_header, Call, Header, Packet, Pid, Port, HEADER_LEN};
+use crate::{parse_header, Call, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
 
 const PID_AX25: Pid = Pid(0xf0);
@@ -369,11 +372,6 @@ struct Pipo {
     //rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
 }
 
-enum PIPOState {
-    AwaitHeader,
-    GotHeader(Header),
-}
-
 impl Pipo {
     fn new(con: TcpStream, router: Arc<Router>) -> Result<Self> {
         //let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
@@ -397,60 +395,40 @@ impl Pipo {
     /*    async fn recv(&self) -> Option<Packet> {
         self.rx.lock().await.recv().await
     } */
-    async fn run(
-        mut con: TcpStream,
-        router: Arc<Router>,
-        mut rx: mpsc::Receiver<Packet>,
-    ) -> Result<()> {
-        let mut state = PIPOState::AwaitHeader;
-        loop {
-            match state {
-                PIPOState::AwaitHeader => {
-                    let mut header = [0_u8; HEADER_LEN];
-                    tokio::select! {
-                    // TODO: fix partial reads.
-                    ok = con.read_exact(&mut header) => {
-                        ok?;
-                        state = PIPOState::GotHeader(parse_header(&header)?);
-                    },
-                    p = rx.recv() => match p {
-                        Some(p) => con.write_all(&p.serialize()).await?,
-                        // TODO: continue reading even while write
-                        // blocks.
-                        None => return Ok(()),
-                    },
-                    };
-                }
-                PIPOState::GotHeader(ref header) => {
-                    if header.data_len > 0 {
-                        let mut payload = vec![0; header.data_len as usize];
-                        tokio::select! {
-                            // TODO: fix partial reads.
-                            ok = con.read_exact(&mut payload) => {
-                                ok?;
-                                let packet = Packet::parse(header, &payload)?;
-                                debug!("agw/pipo: Processing packet len {}", header.data_len);
-                                trace!("agw/pipo: Processing packet {packet:?}");
-                                router.process(packet).await?;
-                                state = PIPOState::AwaitHeader;
-                            },
-                            p = rx.recv() => match p {
-                                Some(p) => con.write_all(&p.serialize()).await?,
-                                // TODO: should we continue receiving
-                                // from con, still? Could deadlock?
-                                None => return Ok(()),
-                            },
-                        };
-                    } else {
-                        // Disconnect.
-                        let packet = Packet::parse(header, &[])?;
-                        debug!("agw/pipo: Processing (should be Disconnect) {packet:?}");
-                        router.process(packet).await?;
-                        state = PIPOState::AwaitHeader;
-                    }
-                }
-            }
+    async fn run(con: TcpStream, router: Arc<Router>, rx: mpsc::Receiver<Packet>) -> Result<()> {
+        let (reader, writer) = con.into_split();
+        // While we could `try_join` here, that wouldn't shut down the
+        // connection when the application disappears, and we'd be left hanging.
+        tokio::select! {
+            ret = Self::read_loop(reader, router) => ret,
+            ret = Self::write_loop(writer, rx) => ret,
         }
+    }
+
+    async fn read_loop(mut con: OwnedReadHalf, router: Arc<Router>) -> Result<()> {
+        loop {
+            let mut header = [0_u8; HEADER_LEN];
+            con.read_exact(&mut header).await?;
+            let header = parse_header(&header)?;
+            let payload = if header.data_len > 0 {
+                let mut payload = vec![0; crate::payload_len(header.data_len)?];
+                con.read_exact(&mut payload).await?;
+                payload
+            } else {
+                Vec::new()
+            };
+            let packet = Packet::parse(&header, &payload)?;
+            debug!("agw/pipo: Processing packet len {}", header.data_len);
+            trace!("agw/pipo: Processing packet {packet:?}");
+            router.process(packet).await?;
+        }
+    }
+
+    async fn write_loop(mut con: OwnedWriteHalf, mut rx: mpsc::Receiver<Packet>) -> Result<()> {
+        while let Some(packet) = rx.recv().await {
+            con.write_all(&packet.serialize()).await?;
+        }
+        Ok(())
     }
 }
 
