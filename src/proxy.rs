@@ -90,7 +90,7 @@ impl ConnectionV2 {
 
             let header = crate::parse_header(&header)?;
             let payload = if header.data_len > 0 {
-                let mut payload = vec![0; header.data_len as usize];
+                let mut payload = vec![0; crate::payload_len(header.data_len)?];
                 rstream.read_exact(&mut payload)?;
                 payload
             } else {

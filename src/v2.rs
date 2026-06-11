@@ -148,7 +148,7 @@ impl AgwCon {
             }?;
             let header = crate::parse_header(&header)?;
             // Read data.
-            let mut data = vec![0_u8; usize::try_from(header.data_len)?];
+            let mut data = vec![0_u8; crate::payload_len(header.data_len)?];
             r.read_exact(&mut data)?;
 
             // Inform all subscribing children.
