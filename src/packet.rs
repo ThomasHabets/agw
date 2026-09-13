@@ -471,6 +471,7 @@ impl Packet {
                 } else {
                     let s = String::from_utf8(data.to_vec()).map_err(Error::other)?;
                     if s.starts_with("*** CONNECTED WITH")
+                        || s.starts_with("*** CONNECTED With ")
                         || s.starts_with("*** CONNECTED With Station ")
                     {
                         debug!("agw: Got ConnectionEstablished {s}");
@@ -713,5 +714,29 @@ mod tests {
         let header: [u8; crate::HEADER_LEN] = bytes.try_into().unwrap();
         let header = crate::parse_header(&header).unwrap();
         assert_eq!(Packet::parse(&header, &[]).unwrap(), packet);
+    }
+
+    #[test]
+    fn parses_standard_connection_confirmation() {
+        let src: Call = "REMOTE".parse().unwrap();
+        let dst: Call = "LOCAL".parse().unwrap();
+        let header = Header::new(
+            Port(1),
+            CMD_CONNECT,
+            Pid(0),
+            Some(src.clone()),
+            Some(dst.clone()),
+            27,
+        );
+
+        assert_eq!(
+            Packet::parse(&header, b"*** CONNECTED With REMOTE\r\0").unwrap(),
+            Packet::ConnectionEstablished {
+                port: Port(1),
+                pid: Pid(0),
+                src,
+                dst,
+            }
+        );
     }
 }
