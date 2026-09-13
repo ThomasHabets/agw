@@ -123,6 +123,19 @@ pub enum Packet {
         dst: Call,
         data: Vec<u8>,
     },
+    /// A frame type the crate does not model yet.
+    ///
+    /// Its header fields and transparent payload are retained so proxies and
+    /// applications can continue operating when AGWPE sends another standard
+    /// frame type.
+    Opaque {
+        port: Port,
+        pid: Pid,
+        data_kind: u8,
+        src: Option<Call>,
+        dst: Option<Call>,
+        data: Vec<u8>,
+    },
     // FramesOutstandingConnection(u32), // Y
     // HeardStations(String) // H
     // MonitorConnected(Vec<u8>) // I
@@ -422,6 +435,26 @@ impl Packet {
                 caps.bytes_per_2min.to_le_bytes().to_vec(),
             ]
             .concat(),
+            Packet::Opaque {
+                port,
+                pid,
+                data_kind,
+                src,
+                dst,
+                data,
+            } => [
+                Header::new(
+                    *port,
+                    *data_kind,
+                    *pid,
+                    src.clone(),
+                    dst.clone(),
+                    u32::try_from(data.len()).expect("can't happen"),
+                )
+                .serialize(),
+                data.clone(),
+            ]
+            .concat(),
         }
     }
     #[allow(clippy::too_many_lines)]
@@ -680,12 +713,14 @@ impl Packet {
                     )));
                 }
             }
-            _ => {
-                return Err(Error::msg(format!(
-                    "unknown packet kind {}",
-                    header.data_kind
-                )));
-            }
+            _ => Packet::Opaque {
+                port: header.port,
+                pid: header.pid,
+                data_kind: header.data_kind,
+                src: header.src.clone(),
+                dst: header.dst.clone(),
+                data: data.to_vec(),
+            },
         })
     }
 }
@@ -736,6 +771,32 @@ mod tests {
                 pid: Pid(0),
                 src,
                 dst,
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_unmodeled_packet() {
+        let src: Call = "REMOTE".parse().unwrap();
+        let dst: Call = "LOCAL".parse().unwrap();
+        let header = Header::new(
+            Port(1),
+            b'U',
+            Pid(0xf0),
+            Some(src.clone()),
+            Some(dst.clone()),
+            3,
+        );
+
+        assert_eq!(
+            Packet::parse(&header, b"UI!").unwrap(),
+            Packet::Opaque {
+                port: Port(1),
+                pid: Pid(0xf0),
+                data_kind: b'U',
+                src: Some(src),
+                dst: Some(dst),
+                data: b"UI!".to_vec(),
             }
         );
     }

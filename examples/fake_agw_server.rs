@@ -203,7 +203,8 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
             | Packet::RegisterCallsignReply { .. }
             | Packet::PortCapReply { .. }
             | Packet::CallsignHeardReply { .. }
-            | Packet::PortInfoReply(_) => {}
+            | Packet::PortInfoReply(_)
+            | Packet::Opaque { .. } => {}
         }
     }
 }
