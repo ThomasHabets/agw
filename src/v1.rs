@@ -186,15 +186,27 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
         b'C' => Reply::ConnectionEstablished(Connected {
             port: header.port,
             pid: header.pid,
-            src: header.src.clone().unwrap(),
-            dst: header.dst.clone().unwrap(),
+            src: header
+                .src
+                .clone()
+                .ok_or(Error::msg("connection established missing src"))?,
+            dst: header
+                .dst
+                .clone()
+                .ok_or(Error::msg("connection established missing dst"))?,
             data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
         }),
         b'D' => Reply::ConnectedData(ConnectedData {
             port: header.port,
             pid: header.pid,
-            src: header.src.clone().unwrap(),
-            dst: header.dst.clone().unwrap(),
+            src: header
+                .src
+                .clone()
+                .ok_or(Error::msg("connected data missing src"))?,
+            dst: header
+                .dst
+                .clone()
+                .ok_or(Error::msg("connected data missing dst"))?,
             data: data.to_vec(),
         }),
         b'd' => Reply::Disconnect,
@@ -208,12 +220,12 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 let mut np = s.splitn(2, ';');
                 let count = np
                     .next()
-                    .expect("TODO: custom error")
+                    .ok_or(Error::msg("port info reply missing count"))?
                     .parse()
                     .map_err(Error::other)?;
                 let ports = np
                     .next()
-                    .expect("TODO: custom error")
+                    .ok_or(Error::msg("port info reply missing ports"))?
                     .split(';')
                     .map(std::string::ToString::to_string)
                     .filter(|s| s != "\0")
@@ -266,7 +278,7 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             };
 
             Reply::PortCaps(
-                Port(header.port.0 + 1),
+                header.port,
                 PortCaps {
                     rate: Baud::from_byte(rate).unwrap_or(Baud::Unknown),
                     traffic_level,
@@ -288,7 +300,7 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 )));
             }
             Reply::FramesOutstandingPort(
-                Port(header.port.0 + 1),
+                header.port,
                 usize::try_from(u32::from_le_bytes(
                     data[0..4].try_into().expect("can't happen: bytes to u32"),
                 ))
@@ -307,7 +319,7 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             ))
         }
         b'H' => Reply::CallsignHeard(
-            Port(header.port.0 + 1),
+            header.port,
             // TODO: implement parse.
             vec![],
         ),
@@ -403,7 +415,8 @@ impl<'a> Connection<'a> {
     ///
     /// If the underlying connection fails.
     pub fn read(&mut self) -> Result<Vec<u8>> {
-        self.agw.read_connected(&self.src, &self.dst)
+        self.agw
+            .read_connected(self.port, self.pid, &self.src, &self.dst)
     }
 
     /// Write data to the connection.
@@ -752,13 +765,16 @@ impl AGW {
                 }
                 .serialize(),
             )?;
-            todo!();
         }
         let connect_string;
         loop {
             let (head, r) = self.rx.recv().map_err(Error::other)?;
-            if (head.src.as_ref() != Some(dst)) || (head.dst.as_ref() != Some(src)) {
-                //eprintln!("Got packet not for us");
+            if head.port != port
+                || head.pid != pid
+                || (head.src.as_ref() != Some(dst))
+                || (head.dst.as_ref() != Some(src))
+            {
+                self.rx_enqueue(head, r);
                 continue;
             }
             match r {
@@ -807,11 +823,21 @@ impl AGW {
         Ok(data.len())
     }
 
-    fn read_connected(&mut self, me: &Call, remote: &Call) -> Result<Vec<u8>> {
+    fn read_connected(
+        &mut self,
+        port: Port,
+        pid: Pid,
+        me: &Call,
+        remote: &Call,
+    ) -> Result<Vec<u8>> {
         // First check the existing queue.
         for frame in self.rxqueue.iter().enumerate() {
             let (n, (head, payload)) = &frame;
-            if (head.src.as_ref() != Some(remote)) || (head.dst.as_ref() != Some(me)) {
+            if head.port != port
+                || head.pid != pid
+                || (head.src.as_ref() != Some(remote))
+                || (head.dst.as_ref() != Some(me))
+            {
                 continue;
             }
             match payload {
@@ -838,9 +864,120 @@ impl AGW {
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
-                Reply::ConnectedData(i) => return Ok(i.data),
+                Reply::ConnectedData(i)
+                    if i.port == port && i.pid == pid && i.src == *remote && i.dst == *me =>
+                {
+                    return Ok(i.data);
+                }
+                Reply::Disconnect
+                    if h.port == port
+                        && h.pid == pid
+                        && (h.src.as_ref() == Some(remote))
+                        && (h.dst.as_ref() == Some(me)) =>
+                {
+                    return Err(Error::msg("remote end disconnected"));
+                }
                 other => self.rx_enqueue(h, other),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(s: &str) -> Call {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn parse_reply_keeps_normalized_header_port() {
+        let header = Header::new(Port(1), b'y', Pid(0), None, None, 4);
+        match parse_reply(&header, &7_u32.to_le_bytes()).unwrap() {
+            Reply::FramesOutstandingPort(port, n) => {
+                assert_eq!(port, Port(1));
+                assert_eq!(n, 7);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        let header = Header::new(Port(1), b'H', Pid(0), None, None, 1);
+        match parse_reply(&header, &[0]).unwrap() {
+            Reply::CallsignHeard(port, _) => assert_eq!(port, Port(1)),
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        let header = Header::new(Port(1), b'g', Pid(0), None, None, 12);
+        match parse_reply(&header, &[0, 0xff, 30, 10, 63, 10, 4, 0, 0, 0, 0, 0]).unwrap() {
+            Reply::PortCaps(port, _) => assert_eq!(port, Port(1)),
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_reply_errors_on_missing_callsigns() {
+        let header = Header::new(Port(1), b'D', Pid(0xf0), None, None, 0);
+        assert!(parse_reply(&header, &[]).is_err());
+    }
+
+    #[test]
+    fn read_connected_skips_unrelated_live_data() {
+        let me = call("ME");
+        let remote = call("REMOTE");
+        let other = call("OTHER");
+        let (rx_tx, rx) = mpsc::channel();
+        let (tx, _tx_rx) = mpsc::channel();
+        let mut agw = AGW {
+            rx,
+            tx,
+            rxqueue: LinkedList::new(),
+        };
+
+        rx_tx
+            .send((
+                Header::new(
+                    Port(1),
+                    b'D',
+                    Pid(0xf0),
+                    Some(other.clone()),
+                    Some(me.clone()),
+                    3,
+                ),
+                Reply::ConnectedData(ConnectedData {
+                    port: Port(1),
+                    pid: Pid(0xf0),
+                    src: other,
+                    dst: me.clone(),
+                    data: b"bad".to_vec(),
+                }),
+            ))
+            .unwrap();
+        rx_tx
+            .send((
+                Header::new(
+                    Port(1),
+                    b'D',
+                    Pid(0xf0),
+                    Some(remote.clone()),
+                    Some(me.clone()),
+                    2,
+                ),
+                Reply::ConnectedData(ConnectedData {
+                    port: Port(1),
+                    pid: Pid(0xf0),
+                    src: remote.clone(),
+                    dst: me.clone(),
+                    data: b"ok".to_vec(),
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            agw.read_connected(Port(1), Pid(0xf0), &me, &remote)
+                .unwrap(),
+            b"ok"
+        );
+        assert_eq!(agw.rxqueue.len(), 1);
     }
 }

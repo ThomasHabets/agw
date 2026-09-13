@@ -47,6 +47,7 @@ impl Proxy {
                 Ok(packet) => {
                     if let Some(p) = cb_down(packet) {
                     debug!("agw: … Transformed into {p:?}");
+                    self.up.send(p)?;
                     }
                 },
                 Err(_e) => return Ok(()),
@@ -58,6 +59,7 @@ impl Proxy {
                 Ok(packet) => {
                     if let Some(p) = cb_up(packet) {
                     debug!("agw: Transformed into {p:?}");
+                    self.down.send(p)?;
                     }
                 },
                 Err(_e) => return Ok(()),

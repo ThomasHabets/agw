@@ -310,6 +310,17 @@ impl Packet {
             } => {
                 let mut chunks = Vec::new();
                 trace!("agw: Sending data with pid {pid:?}");
+                if data.is_empty() {
+                    return Header::new(
+                        *port,
+                        CMD_DATA,
+                        *pid,
+                        Some(src.clone()),
+                        Some(dst.clone()),
+                        0,
+                    )
+                    .serialize();
+                }
                 // TODO: magic number.
                 for chunk in data.chunks(200) {
                     chunks.push(
@@ -502,7 +513,7 @@ impl Packet {
                     )));
                 }
                 let mut via = Vec::with_capacity(usize::from(nhops));
-                for chunk in data[1..].chunks_exact(10) {
+                for chunk in data[1..].as_chunks::<10>().0 {
                     via.push(Call::from_bytes(chunk)?);
                 }
                 debug!("agw: Got ConnectVia from {src:?} to {dst:?} via {via:?}");
@@ -675,5 +686,32 @@ impl Packet {
                 )));
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_data_serializes_as_zero_length_frame() {
+        let src: Call = "SRC".parse().unwrap();
+        let dst: Call = "DST".parse().unwrap();
+        let packet = Packet::Data {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            data: Vec::new(),
+        };
+
+        let bytes = packet.serialize();
+        assert_eq!(bytes.len(), crate::HEADER_LEN);
+        assert_eq!(bytes[4], CMD_DATA);
+        assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), 0);
+
+        let header: [u8; crate::HEADER_LEN] = bytes.try_into().unwrap();
+        let header = crate::parse_header(&header).unwrap();
+        assert_eq!(Packet::parse(&header, &[]).unwrap(), packet);
     }
 }

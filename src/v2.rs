@@ -181,7 +181,21 @@ pub struct Connection {
 
 impl Write for Connection {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.parent.write(data).map_err(std::io::Error::other)?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        self.parent
+            .write(
+                &Packet::Data {
+                    port: self.port,
+                    pid: self.pid,
+                    src: self.me.clone(),
+                    dst: self.peer.clone(),
+                    data: data.to_vec(),
+                }
+                .serialize(),
+            )
+            .map_err(std::io::Error::other)?;
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -464,12 +478,15 @@ impl AGW {
                 }
                 .serialize(),
             )?;
-            todo!();
         }
         let c = loop {
             break match rx.read() {
                 Reply::Error(e) => Err(e),
-                Reply::ConnectionEstablished(i) => Ok(i),
+                Reply::ConnectionEstablished(i)
+                    if i.port == port && i.pid == pid && i.src == peer && i.dst == me =>
+                {
+                    Ok(i)
+                }
                 _ => continue,
             };
         }?;
