@@ -482,8 +482,10 @@ impl AGW {
         let c = loop {
             break match rx.read() {
                 Reply::Error(e) => Err(e),
+                // AGWPE uses PID 0x00 on a C confirmation, even when the
+                // connection's data PID is 0xf0.
                 Reply::ConnectionEstablished(i)
-                    if i.port == port && i.pid == pid && i.src == peer && i.dst == me =>
+                    if i.port == port && i.src == peer && i.dst == me =>
                 {
                     Ok(i)
                 }

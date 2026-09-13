@@ -769,8 +769,9 @@ impl AGW {
         let connect_string;
         loop {
             let (head, r) = self.rx.recv().map_err(Error::other)?;
+            // AGWPE uses PID 0x00 on a C confirmation, even when the
+            // connection's data PID is 0xf0.
             if head.port != port
-                || head.pid != pid
                 || (head.src.as_ref() != Some(dst))
                 || (head.dst.as_ref() != Some(src))
             {
