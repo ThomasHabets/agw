@@ -135,12 +135,16 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                 server.send(&fake_port_cap_reply(port)).await?;
             }
             Packet::CallsignHeardQuery(port) => {
-                server
-                    .send(&Packet::CallsignHeardReply {
-                        port,
-                        data: vec![0],
-                    })
-                    .await?;
+                // AGWPE sends exactly 20 H replies per query. Each reply has
+                // a NUL-terminated text section and two SYSTEMTIME values.
+                for _ in 0..20 {
+                    server
+                        .send(&Packet::CallsignHeardReply {
+                            port,
+                            data: vec![0; 33],
+                        })
+                        .await?;
+                }
             }
             Packet::RegisterCallsign(port, call) => {
                 server

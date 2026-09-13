@@ -64,8 +64,8 @@ pub enum Packet {
     /// AGWPE: Callsigns heard reply.
     ///
     /// The full AGW payload includes timestamps the crate does not currently
-    /// model, so this keeps the raw payload bytes. For an empty heard list,
-    /// send a single trailing NUL byte: `vec![0]`.
+    /// model, so this keeps the raw payload bytes. Every reply contains a
+    /// NUL-terminated text area followed by two 16-byte SYSTEMTIME values.
     CallsignHeardReply {
         port: Port,
         data: Vec<u8>,

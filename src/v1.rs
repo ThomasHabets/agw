@@ -8,6 +8,8 @@ use crate::HEADER_LEN;
 use crate::{Call, Header, Packet, Pid, Port};
 use crate::{Error, Result};
 
+const CALLSIGN_HEARD_REPLIES: usize = 20;
+
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
 /// Info about one port.
@@ -318,16 +320,26 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                 data[0..4].try_into().expect("can't happen: bytes to u32"),
             ))
         }
-        b'H' => Reply::CallsignHeard(
-            header.port,
-            // TODO: implement parse.
-            vec![],
-        ),
+        b'H' => Reply::CallsignHeard(header.port, parse_callsign_heard(data)?),
         b'I' => Reply::MonitorConnected(data.to_vec()),
         b'S' => Reply::MonitorSupervisory(data.to_vec()),
         b'K' => Reply::Raw(data.to_vec()),
         _ => Reply::Unknown(header.clone(), data.to_vec()),
     })
+}
+
+fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
+    let text_len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let text = std::str::from_utf8(&data[..text_len]).map_err(Error::other)?;
+    let Some(call) = text.split_ascii_whitespace().next() else {
+        return Ok(vec![]);
+    };
+
+    // Empty H entries contain timestamp text but no callsign.
+    let Ok(call) = Call::from_bytes(call.as_bytes()) else {
+        return Ok(vec![]);
+    };
+    Ok(vec![CallsignHeard { call }])
 }
 
 /// An object that has all the metadata needed to be able to create
@@ -673,16 +685,21 @@ impl AGW {
     }
 
     /// Get callsigns heard.
-    // TODO: this is probably broken. The spec says up to 20 frames can be
-    // received? Ending with empty callsign one? Direwolf isn't sending me
-    // anything.
     pub fn callsign_heard(&mut self, port: Port) -> Result<Vec<CallsignHeard>> {
+        let mut heard = Vec::new();
+        let mut replies = 0;
         self.send(&Packet::CallsignHeardQuery(port).serialize())
             .map_err(Error::other)?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
-                Reply::CallsignHeard(p, i) if p == port => return Ok(i),
+                Reply::CallsignHeard(p, mut i) if p == port => {
+                    heard.append(&mut i);
+                    replies += 1;
+                    if replies == CALLSIGN_HEARD_REPLIES {
+                        return Ok(heard);
+                    }
+                }
                 other => self.rx_enqueue(h, other),
             }
         }
@@ -920,6 +937,24 @@ mod tests {
     fn parse_reply_errors_on_missing_callsigns() {
         let header = Header::new(Port(1), b'D', Pid(0xf0), None, None, 0);
         assert!(parse_reply(&header, &[]).is_err());
+    }
+
+    #[test]
+    fn parses_callsign_heard_entry() {
+        assert_eq!(
+            parse_callsign_heard(b"REMOTE-1 Mon,21Feb2000 11:14:30\0ignored").unwrap(),
+            vec![CallsignHeard {
+                call: call("REMOTE-1")
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_empty_callsign_heard_entry() {
+        assert_eq!(
+            parse_callsign_heard(b"00:00:00 00:00:00\0").unwrap(),
+            Vec::<CallsignHeard>::new()
+        );
     }
 
     #[test]
