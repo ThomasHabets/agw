@@ -953,6 +953,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn parses_callsign_heard_entry() {
         assert_eq!(
             parse_callsign_heard(b"REMOTE-1 Mon,21Feb2000 11:14:30\0ignored").unwrap(),
