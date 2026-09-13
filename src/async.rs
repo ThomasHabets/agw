@@ -51,6 +51,7 @@ pub enum RuleMatch {
     Data { port: Port, src: Call, dst: Call },
     ConnectionEstablished { port: Port, src: Call, dst: Call },
     IncomingConnect { port: Port, dst: Call },
+    RegisterCallsign { call: Call },
 }
 
 /// 3-tuple for a connection.
@@ -140,6 +141,11 @@ impl RuleMatch {
                 } = packet
                 {
                     return port == port2 && dst == dst2;
+                }
+            }
+            RuleMatch::RegisterCallsign { call } => {
+                if let Packet::RegisterCallsignReply { call: call2, .. } = packet {
+                    return call == call2;
                 }
             }
         }
@@ -552,7 +558,23 @@ impl AGW {
     ///
     /// If the underlying connection fails.
     pub async fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
-        self.send(Packet::RegisterCallsign(port, src.clone())).await
+        let (tx, mut rx) = mpsc::channel(1);
+        let rule_handle = self
+            .router
+            .add(RuleMatch::RegisterCallsign { call: src.clone() }, tx);
+        self.send(Packet::RegisterCallsign(port, src.clone()))
+            .await?;
+        let reply = rx.recv().await.ok_or(Error::msg("no registration reply"))?;
+        drop(rule_handle);
+        match reply {
+            Packet::RegisterCallsignReply { success: true, .. } => Ok(()),
+            Packet::RegisterCallsignReply { success: false, .. } => Err(Error::msg(format!(
+                "callsign registration failed for {src}"
+            ))),
+            other => Err(Error::msg(format!(
+                "unexpected registration reply: {other:?}"
+            ))),
+        }
     }
 
     /// Listen for incoming connections to a local callsign.

@@ -448,9 +448,21 @@ impl AGW {
     /// If underlying connection fails.
     pub fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
         debug!("agw: Registering callsign");
+        let rx = self.parent.clone().rx();
         self.parent
             .write(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
-        Ok(())
+        loop {
+            match rx.read() {
+                Reply::Error(e) => return Err(e),
+                Reply::CallsignRegistration(true) => return Ok(()),
+                Reply::CallsignRegistration(false) => {
+                    return Err(Error::msg(format!(
+                        "callsign registration failed for {src}"
+                    )));
+                }
+                other => warn!("Got other: {other:?}"),
+            }
+        }
     }
 
     pub fn connect(&self, port: Port, me: Call, peer: Call, via: &[Call]) -> Result<Connection> {

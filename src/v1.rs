@@ -745,7 +745,20 @@ impl AGW {
     pub fn register_callsign(&mut self, port: Port, src: &Call) -> Result<()> {
         debug!("agw: Registering callsign");
         self.send(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
-        Ok(())
+        loop {
+            let (header, reply) = self.rx.recv().map_err(Error::other)?;
+            match reply {
+                Reply::CallsignRegistration(true) if header.src.as_ref() == Some(src) => {
+                    return Ok(());
+                }
+                Reply::CallsignRegistration(false) if header.src.as_ref() == Some(src) => {
+                    return Err(Error::msg(format!(
+                        "callsign registration failed for {src}"
+                    )));
+                }
+                other => self.rx_enqueue(header, other),
+            }
+        }
     }
 
     /// Create a new connection.
@@ -954,6 +967,30 @@ mod tests {
         assert_eq!(
             parse_callsign_heard(b"00:00:00 00:00:00\0").unwrap(),
             Vec::<CallsignHeard>::new()
+        );
+    }
+
+    #[test]
+    fn register_callsign_waits_for_confirmation() {
+        let call = call("LOCAL");
+        let (rx_tx, rx) = mpsc::channel();
+        let (tx, tx_rx) = mpsc::channel();
+        let mut agw = AGW {
+            rx,
+            tx,
+            rxqueue: LinkedList::new(),
+        };
+        rx_tx
+            .send((
+                Header::new(Port(1), b'X', Pid(0), Some(call.clone()), None, 1),
+                Reply::CallsignRegistration(true),
+            ))
+            .unwrap();
+
+        agw.register_callsign(Port(1), &call).unwrap();
+        assert_eq!(
+            tx_rx.recv().unwrap(),
+            Packet::RegisterCallsign(Port(1), call).serialize()
         );
     }
 
