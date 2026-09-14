@@ -1,8 +1,12 @@
 use std::str::FromStr;
-use std::sync::mpsc;
 use std::{
     io::{Read, Write},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{ChildStdin, Command, ExitStatus, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    time::Duration,
 };
 
 use anyhow::{Error, Result};
@@ -21,14 +25,33 @@ use agw::{Call, Pid, Port};
 const ZMODEM_START: &[u8] = b"**\x18B00";
 
 struct ZmodemReceiver {
-    child: Child,
     stdin: ChildStdin,
+    completion: mpsc::Receiver<ZmodemExit>,
+    cancel: mpsc::Sender<()>,
+}
+
+enum ZmodemExit {
+    Exited(ExitStatus),
+    Failed(String),
+    Cancelled,
 }
 
 impl ZmodemReceiver {
-    fn start(sender: mpsc::Sender<Vec<u8>>, writer: agw::MakeWriter) -> Result<Self> {
+    fn start(
+        sender: mpsc::Sender<Vec<u8>>,
+        writer: agw::MakeWriter,
+        active: Arc<AtomicBool>,
+        status_tx: mpsc::Sender<String>,
+    ) -> Result<Self> {
         let mut child = Command::new("rz")
-            .args(["--binary", "--restricted", "--zmodem"])
+            .args([
+                "--binary",
+                "--restricted",
+                "--restricted",
+                "--protect",
+                "--zmodem",
+                "--quiet",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -66,7 +89,47 @@ impl ZmodemReceiver {
             }
         });
 
-        Ok(Self { child, stdin })
+        let (completion_tx, completion) = mpsc::channel();
+        let (cancel, cancel_rx) = mpsc::channel();
+        std::thread::spawn(move || loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    active.store(false, Ordering::Release);
+                    if status.success() {
+                        let _ = status_tx.send("ZMODEM receive completed".into());
+                    } else {
+                        let _ = status_tx.send(format!("ZMODEM receive failed: {status}"));
+                    }
+                    let _ = completion_tx.send(ZmodemExit::Exited(status));
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    active.store(false, Ordering::Release);
+                    let message = format!("waiting for rz failed: {error}");
+                    let _ = status_tx.send(format!("ZMODEM receive failed: {message}"));
+                    let _ = completion_tx.send(ZmodemExit::Failed(message));
+                    return;
+                }
+            }
+
+            match cancel_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    active.store(false, Ordering::Release);
+                    let _ = completion_tx.send(ZmodemExit::Cancelled);
+                    return;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        });
+
+        Ok(Self {
+            stdin,
+            completion,
+            cancel,
+        })
     }
 
     fn write(&mut self, data: &[u8]) -> Result<()> {
@@ -75,19 +138,25 @@ impl ZmodemReceiver {
         Ok(())
     }
 
-    fn finished(&mut self) -> Result<bool> {
-        let Some(status) = self.child.try_wait()? else {
-            return Ok(false);
-        };
-        debug!("rz exited with {status}");
-        Ok(true)
+    fn finished(&self) -> Result<bool> {
+        match self.completion.try_recv() {
+            Ok(ZmodemExit::Exited(status)) => {
+                debug!("rz exited with {status}");
+                Ok(true)
+            }
+            Ok(ZmodemExit::Failed(message)) => Err(Error::msg(message)),
+            Ok(ZmodemExit::Cancelled) => Ok(true),
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(Error::msg("rz completion monitor stopped unexpectedly"))
+            }
+        }
     }
 }
 
 impl Drop for ZmodemReceiver {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.cancel.send(());
     }
 }
 
@@ -403,14 +472,22 @@ fn main() -> Result<()> {
     let make_writer = con.make_writer();
     let zmodem_sender = sender.clone();
     let zmodem_writer = make_writer.clone();
+    let zmodem_active = Arc::new(AtomicBool::new(false));
 
     let cq_tx2 = cq_tx.clone();
     let src2 = opt.src.clone();
     let dst2 = opt.dst.clone();
+    let up_zmodem_active = Arc::clone(&zmodem_active);
+    let up_status_tx = status_tx.clone();
 
     let up_thread = std::thread::spawn(move || loop {
         match up_rx.recv() {
             Ok(data) => {
+                if up_zmodem_active.load(Ordering::Acquire) {
+                    let _ = up_status_tx
+                        .send("ZMODEM receive is still active; command not sent".into());
+                    continue;
+                }
                 let bdata = data.as_bytes();
                 let bdata = make_writer
                     .data(bdata)
@@ -448,18 +525,32 @@ fn main() -> Result<()> {
             }
         };
 
+        let mut forward_to_zmodem = false;
         if let Some(receiver) = zmodem_receiver.as_mut() {
-            if receiver.finished()? {
-                zmodem_receiver = None;
-                let _ = status_tx.send("ZMODEM receive completed".into());
-            } else if let Err(e) = receiver.write(&read) {
-                warn!("writing received data to rz failed: {e}");
-                zmodem_receiver = None;
-                let _ = status_tx.send("ZMODEM receive failed".into());
-                continue;
-            } else {
-                continue;
+            match receiver.finished() {
+                Ok(true) => zmodem_receiver = None,
+                Ok(false) => match receiver.write(&read) {
+                    Ok(()) => forward_to_zmodem = true,
+                    Err(e) => {
+                        // `rz` can exit just after the final ZMODEM frame.
+                        // Do not discard this packet: it may already be the
+                        // BBS's first ordinary response.
+                        warn!("writing received data to rz failed: {e}");
+                        zmodem_active.store(false, Ordering::Release);
+                        zmodem_receiver = None;
+                        let _ = status_tx.send("ZMODEM receive failed".into());
+                    }
+                },
+                Err(e) => {
+                    warn!("checking rz status failed: {e}");
+                    zmodem_active.store(false, Ordering::Release);
+                    zmodem_receiver = None;
+                    let _ = status_tx.send("ZMODEM receive failed".into());
+                }
             }
+        }
+        if forward_to_zmodem {
+            continue;
         }
 
         zmodem_probe.extend(read);
@@ -475,10 +566,17 @@ fn main() -> Result<()> {
             }
             let zmodem_data = zmodem_probe.split_off(offset);
             zmodem_probe.clear();
-            match ZmodemReceiver::start(zmodem_sender.clone(), zmodem_writer.clone()) {
+            zmodem_active.store(true, Ordering::Release);
+            match ZmodemReceiver::start(
+                zmodem_sender.clone(),
+                zmodem_writer.clone(),
+                Arc::clone(&zmodem_active),
+                status_tx.clone(),
+            ) {
                 Ok(mut receiver) => {
                     if let Err(e) = receiver.write(&zmodem_data) {
                         warn!("writing ZMODEM header to rz failed: {e}");
+                        zmodem_active.store(false, Ordering::Release);
                         let _ = status_tx.send("ZMODEM receive failed".into());
                     } else {
                         zmodem_receiver = Some(receiver);
@@ -487,6 +585,7 @@ fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!("starting rz failed: {e}");
+                    zmodem_active.store(false, Ordering::Release);
                     let _ = status_tx.send("Unable to start rz".into());
                     if !relay_terminal_data(&zmodem_data, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
                         break;
