@@ -347,6 +347,7 @@ fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
 /// owning the whole connection object.
 ///
 /// See examples/term.rs for example use.
+#[derive(Clone)]
 pub struct MakeWriter {
     port: Port,
     pid: Pid,

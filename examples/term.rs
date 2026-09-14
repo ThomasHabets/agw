@@ -1,5 +1,9 @@
 use std::str::FromStr;
 use std::sync::mpsc;
+use std::{
+    io::{Read, Write},
+    process::{Child, ChildStdin, Command, Stdio},
+};
 
 use anyhow::{Error, Result};
 use clap::Parser;
@@ -9,10 +13,111 @@ use cursive::view::{Nameable, Resizable, ScrollStrategy};
 use cursive::views::{
     Dialog, EditView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
 };
-use log::{debug, error};
+use log::{debug, error, warn};
 use serde::Serialize;
 
 use agw::{Call, Pid, Port};
+
+const ZMODEM_START: &[u8] = b"**\x18B00";
+
+struct ZmodemReceiver {
+    child: Child,
+    stdin: ChildStdin,
+}
+
+impl ZmodemReceiver {
+    fn start(sender: mpsc::Sender<Vec<u8>>, writer: agw::MakeWriter) -> Result<Self> {
+        let mut child = Command::new("rz")
+            .args(["--binary", "--restricted", "--zmodem"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::msg("rz did not provide stdin"))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::msg("rz did not provide stdout"))?;
+
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; 1024];
+            loop {
+                let n = match stdout.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(e) => {
+                        warn!("reading rz output failed: {e}");
+                        return;
+                    }
+                };
+                let packet = match writer.data(buf[..n].to_vec()) {
+                    Ok(packet) => packet,
+                    Err(e) => {
+                        warn!("serializing rz output failed: {e}");
+                        return;
+                    }
+                };
+                if sender.send(packet).is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(Self { child, stdin })
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.stdin.write_all(data)?;
+        self.stdin.flush()?;
+        Ok(())
+    }
+
+    fn finished(&mut self) -> Result<bool> {
+        let Some(status) = self.child.try_wait()? else {
+            return Ok(false);
+        };
+        debug!("rz exited with {status}");
+        Ok(true)
+    }
+}
+
+impl Drop for ZmodemReceiver {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn zmodem_start_offset(data: &[u8]) -> Option<usize> {
+    data.windows(ZMODEM_START.len())
+        .position(|window| window == ZMODEM_START)
+}
+
+fn relay_terminal_data(
+    data: &[u8],
+    cq_tx: &mpsc::Sender<CQLogEntry>,
+    down_tx: &mpsc::Sender<String>,
+    src: &str,
+    dst: &str,
+) -> Result<bool> {
+    if data.is_empty() {
+        return Ok(true);
+    }
+    let plain = ascii7_to_str(data);
+    cq_tx.send(CQLogEntry::message(CQLogEntryMessage {
+        src: src.to_string(),
+        dst: dst.to_string(),
+        data: plain.clone(),
+    }))?;
+    if let Err(e) = down_tx.send(plain) {
+        debug!("down_tx failed: {e}");
+        return Ok(false);
+    }
+    Ok(true)
+}
 
 fn run_ui(
     up_tx: mpsc::Sender<String>,
@@ -287,8 +392,9 @@ fn main() -> Result<()> {
         run_ui(up_tx, down_rx, status_rx);
     });
     let sender = con.sender();
-    // up
     let make_writer = con.make_writer();
+    let zmodem_sender = sender.clone();
+    let zmodem_writer = make_writer.clone();
 
     let cq_tx2 = cq_tx.clone();
     let src2 = opt.src.clone();
@@ -318,27 +424,75 @@ fn main() -> Result<()> {
             }
         }
     });
-    // down
+    let mut zmodem_receiver: Option<ZmodemReceiver> = None;
+    let mut zmodem_probe = Vec::new();
     loop {
         let read = match con.read() {
             Ok(data) => data,
             Err(e) => {
+                if !relay_terminal_data(&zmodem_probe, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+                    break;
+                }
                 let _ = status_tx.send("Connection closed".into());
                 debug!("Connection read: {e}");
                 // TODO: update connected status box.
                 break;
             }
         };
-        let plain = ascii7_to_str(&read);
-        cq_tx.send(CQLogEntry::message(CQLogEntryMessage {
-            src: opt.dst.clone(),
-            dst: opt.src.clone(),
-            data: plain.clone(),
-        }))?;
 
-        if let Err(e) = down_tx.send(plain) {
-            debug!("down_tx failed: {e}");
-            break;
+        if let Some(receiver) = zmodem_receiver.as_mut() {
+            if receiver.finished()? {
+                zmodem_receiver = None;
+                let _ = status_tx.send("ZMODEM receive completed".into());
+            } else if let Err(e) = receiver.write(&read) {
+                warn!("writing received data to rz failed: {e}");
+                zmodem_receiver = None;
+                let _ = status_tx.send("ZMODEM receive failed".into());
+                continue;
+            } else {
+                continue;
+            }
+        }
+
+        zmodem_probe.extend(read);
+        if let Some(offset) = zmodem_start_offset(&zmodem_probe) {
+            if !relay_terminal_data(
+                &zmodem_probe[..offset],
+                &cq_tx,
+                &down_tx,
+                &opt.dst,
+                &opt.src,
+            )? {
+                break;
+            }
+            let zmodem_data = zmodem_probe.split_off(offset);
+            zmodem_probe.clear();
+            match ZmodemReceiver::start(zmodem_sender.clone(), zmodem_writer.clone()) {
+                Ok(mut receiver) => {
+                    if let Err(e) = receiver.write(&zmodem_data) {
+                        warn!("writing ZMODEM header to rz failed: {e}");
+                        let _ = status_tx.send("ZMODEM receive failed".into());
+                    } else {
+                        zmodem_receiver = Some(receiver);
+                        let _ = status_tx.send("Receiving ZMODEM files".into());
+                    }
+                }
+                Err(e) => {
+                    error!("starting rz failed: {e}");
+                    let _ = status_tx.send("Unable to start rz".into());
+                    if !relay_terminal_data(&zmodem_data, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+                        break;
+                    }
+                }
+            }
+        } else {
+            let retained = zmodem_probe.len().min(ZMODEM_START.len() - 1);
+            let terminal_len = zmodem_probe.len() - retained;
+            let terminal_data = zmodem_probe[..terminal_len].to_vec();
+            zmodem_probe.drain(..terminal_len);
+            if !relay_terminal_data(&terminal_data, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+                break;
+            }
         }
     }
     debug!("Joining UI and upload threads");
@@ -361,4 +515,19 @@ fn ascii7_to_str(bytes: &[u8]) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_zmodem_start_sequence() {
+        assert_eq!(zmodem_start_offset(b"text**\x18B000000000"), Some(4));
+    }
+
+    #[test]
+    fn ignores_non_zmodem_terminal_data() {
+        assert_eq!(zmodem_start_offset(b"sz some-file.txt\r"), None);
+    }
 }
