@@ -1,6 +1,6 @@
-use std::str::FromStr;
 use std::{
     io::{Read, Write},
+    net::{Shutdown, TcpStream},
     process::{ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -22,7 +22,116 @@ use serde::Serialize;
 
 use agw::{Call, Pid, Port};
 
+const DEFAULT_AGW_ADDR: &str = "127.0.0.1:8010";
 const ZMODEM_START: &[u8] = b"**\x18B00";
+
+enum TerminalConnection<'a> {
+    Agw(agw::Connection<'a>),
+    Tcp(TcpStream),
+}
+
+#[derive(Clone)]
+enum TerminalWriter {
+    Agw {
+        sender: mpsc::Sender<Vec<u8>>,
+        writer: agw::MakeWriter,
+    },
+    Tcp(mpsc::Sender<TcpWrite>),
+}
+
+enum TcpWrite {
+    Data(Vec<u8>),
+    Disconnect,
+}
+
+impl<'a> TerminalConnection<'a> {
+    fn tcp(addr: &str) -> Result<Self> {
+        Ok(Self::Tcp(TcpStream::connect(addr)?))
+    }
+
+    fn connect_string(&self) -> Result<String> {
+        match self {
+            Self::Agw(connection) => Ok(connection.connect_string().to_string()),
+            Self::Tcp(stream) => Ok(format!("Connected to TCP {}", stream.peer_addr()?)),
+        }
+    }
+
+    fn read(&mut self) -> Result<Vec<u8>> {
+        match self {
+            Self::Agw(connection) => connection.read().map_err(Error::from),
+            Self::Tcp(stream) => {
+                let mut data = vec![0; 1024];
+                let len = stream.read(&mut data)?;
+                if len == 0 {
+                    return Err(Error::msg("TCP connection closed"));
+                }
+                data.truncate(len);
+                Ok(data)
+            }
+        }
+    }
+
+    fn writer(&mut self) -> Result<TerminalWriter> {
+        match self {
+            Self::Agw(connection) => Ok(TerminalWriter::Agw {
+                sender: connection.sender(),
+                writer: connection.make_writer(),
+            }),
+            Self::Tcp(stream) => {
+                let mut writer = stream.try_clone()?;
+                let (sender, receiver) = mpsc::channel();
+                std::thread::spawn(move || {
+                    for write in receiver {
+                        match write {
+                            TcpWrite::Data(data) => {
+                                if let Err(e) = writer.write_all(&data) {
+                                    warn!("writing TCP data failed: {e}");
+                                    return;
+                                }
+                            }
+                            TcpWrite::Disconnect => {
+                                if let Err(e) = writer.shutdown(Shutdown::Both) {
+                                    warn!("closing TCP connection failed: {e}");
+                                }
+                                return;
+                            }
+                        }
+                    }
+                });
+                Ok(TerminalWriter::Tcp(sender))
+            }
+        }
+    }
+}
+
+impl TerminalWriter {
+    fn send(&self, data: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Agw { sender, writer } => {
+                let packet = writer.data(data)?;
+                sender
+                    .send(packet)
+                    .map_err(|e| Error::msg(format!("sending AGW data failed: {e}")))?;
+            }
+            Self::Tcp(sender) => sender
+                .send(TcpWrite::Data(data))
+                .map_err(|e| Error::msg(format!("sending TCP data failed: {e}")))?,
+        }
+        Ok(())
+    }
+
+    fn disconnect(&self) -> Result<()> {
+        match self {
+            Self::Agw { sender, writer } => sender
+                .send(writer.disconnect())
+                .map_err(|e| Error::msg(format!("sending AGW disconnect failed: {e}")))?,
+            Self::Tcp(sender) => sender
+                .send(TcpWrite::Disconnect)
+                .map_err(|e| Error::msg(format!("closing TCP connection failed: {e}")))?,
+        }
+        Ok(())
+    }
+}
 
 struct ZmodemReceiver {
     stdin: ChildStdin,
@@ -38,8 +147,7 @@ enum ZmodemExit {
 
 impl ZmodemReceiver {
     fn start(
-        sender: mpsc::Sender<Vec<u8>>,
-        writer: agw::MakeWriter,
+        writer: TerminalWriter,
         active: Arc<AtomicBool>,
         status_tx: mpsc::Sender<String>,
     ) -> Result<Self> {
@@ -76,14 +184,8 @@ impl ZmodemReceiver {
                         return;
                     }
                 };
-                let packet = match writer.data(buf[..n].to_vec()) {
-                    Ok(packet) => packet,
-                    Err(e) => {
-                        warn!("serializing rz output failed: {e}");
-                        return;
-                    }
-                };
-                if sender.send(packet).is_err() {
+                if let Err(e) = writer.send(buf[..n].to_vec()) {
+                    warn!("sending rz output failed: {e}");
                     return;
                 }
             }
@@ -324,18 +426,74 @@ struct Opts {
     #[clap(short = 'C', default_value = "/dev/null")]
     cq_log: String,
 
-    #[clap(short, default_value = "0")]
-    port: u8,
+    #[clap(short, help = "AGW port number (default: 0)")]
+    port: Option<u8>,
 
     // 240 = 0xF0
-    #[clap(short = 'P', default_value = "240")]
-    pid: u8,
+    #[clap(short = 'P', help = "AGW protocol ID (default: 240)")]
+    pid: Option<u8>,
 
-    #[clap(short = 'c', default_value = "127.0.0.1:8010")]
-    agw_addr: String,
+    #[clap(
+        short = 'c',
+        long = "agw-addr",
+        conflicts_with = "tcp",
+        help = "AGW endpoint (default: 127.0.0.1:8010)"
+    )]
+    agw_addr: Option<String>,
 
-    src: String,
-    dst: String,
+    #[clap(long, help = "Raw TCP endpoint")]
+    tcp: Option<String>,
+
+    src: Option<String>,
+    dst: Option<String>,
+}
+
+enum ConnectionOptions {
+    Agw {
+        addr: String,
+        port: Port,
+        pid: Pid,
+        src: Call,
+        dst: Call,
+    },
+    Tcp {
+        addr: String,
+    },
+}
+
+impl Opts {
+    fn connection_options(&self) -> Result<ConnectionOptions> {
+        if let Some(addr) = &self.tcp {
+            if self.port.is_some() || self.pid.is_some() {
+                return Err(Error::msg("--port and --pid are only valid with AGW"));
+            }
+            if self.src.is_some() || self.dst.is_some() {
+                return Err(Error::msg("SRC and DST are only valid with AGW"));
+            }
+            return Ok(ConnectionOptions::Tcp { addr: addr.clone() });
+        }
+
+        let src = self
+            .src
+            .as_deref()
+            .ok_or_else(|| Error::msg("AGW connections require SRC and DST"))?
+            .parse()?;
+        let dst = self
+            .dst
+            .as_deref()
+            .ok_or_else(|| Error::msg("AGW connections require SRC and DST"))?
+            .parse()?;
+        Ok(ConnectionOptions::Agw {
+            addr: self
+                .agw_addr
+                .clone()
+                .unwrap_or_else(|| DEFAULT_AGW_ADDR.to_string()),
+            port: Port(self.port.unwrap_or(0)),
+            pid: Pid(self.pid.unwrap_or(240)),
+            src,
+            dst,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -402,6 +560,7 @@ fn cqlogthread(mut logf: std::fs::File, rx: mpsc::Receiver<CQLogEntry>) {
 #[allow(clippy::similar_names)]
 fn main() -> Result<()> {
     let opt = Opts::parse();
+    let connection_options = opt.connection_options()?;
 
     if let Some(logf) = opt.log {
         use std::io::Write;
@@ -451,12 +610,38 @@ fn main() -> Result<()> {
     let (down_tx, down_rx) = mpsc::channel();
     let (status_tx, status_rx) = mpsc::channel();
 
-    let mut agw = agw::AGW::new(&opt.agw_addr)?;
-    let src = &Call::from_str(&opt.src)?;
-    let dst = &Call::from_str(&opt.dst)?;
-    agw.register_callsign(Port(opt.port), src)?;
-    let mut con = agw.connect(Port(opt.port), Pid(opt.pid), src, dst, &[])?;
-    let initial_status: String = con.connect_string().into();
+    let mut agw_client = match &connection_options {
+        ConnectionOptions::Agw { addr, .. } => Some(agw::AGW::new(addr)?),
+        ConnectionOptions::Tcp { .. } => None,
+    };
+    let (mut con, local_label, remote_label) = match connection_options {
+        ConnectionOptions::Agw {
+            addr: _,
+            port,
+            pid,
+            src,
+            dst,
+        } => {
+            let agw = agw_client.as_mut().expect("AGW client was just created");
+            agw.register_callsign(port, &src)?;
+            let con = agw.connect(port, pid, &src, &dst, &[])?;
+            (
+                TerminalConnection::Agw(con),
+                src.to_string(),
+                dst.to_string(),
+            )
+        }
+        ConnectionOptions::Tcp { addr } => {
+            let con = TerminalConnection::tcp(&addr)?;
+            let remote_label = con
+                .connect_string()?
+                .strip_prefix("Connected to TCP ")
+                .unwrap_or(&addr)
+                .to_string();
+            (con, "TCP".to_string(), remote_label)
+        }
+    };
+    let initial_status = con.connect_string()?;
     status_tx
         .send(initial_status)
         .expect("sending initial status");
@@ -468,17 +653,16 @@ fn main() -> Result<()> {
         }));
         run_ui(up_tx, down_rx, status_rx);
     });
-    let sender = con.sender();
-    let make_writer = con.make_writer();
-    let zmodem_sender = sender.clone();
-    let zmodem_writer = make_writer.clone();
+    let terminal_writer = con.writer()?;
+    let zmodem_writer = terminal_writer.clone();
     let zmodem_active = Arc::new(AtomicBool::new(false));
 
     let cq_tx2 = cq_tx.clone();
-    let src2 = opt.src.clone();
-    let dst2 = opt.dst.clone();
+    let src2 = local_label.clone();
+    let dst2 = remote_label.clone();
     let up_zmodem_active = Arc::clone(&zmodem_active);
     let up_status_tx = status_tx.clone();
+    let up_writer = terminal_writer.clone();
 
     let up_thread = std::thread::spawn(move || loop {
         match up_rx.recv() {
@@ -488,23 +672,24 @@ fn main() -> Result<()> {
                         .send("ZMODEM receive is still active; command not sent".into());
                     continue;
                 }
-                let bdata = data.as_bytes();
-                let bdata = make_writer
-                    .data(bdata)
-                    .expect("failed to create user data packet");
+                let bdata = data.as_bytes().to_vec();
                 let _ = cq_tx2.send(CQLogEntry::message(CQLogEntryMessage {
                     src: src2.clone(),
                     dst: dst2.clone(),
                     data,
                 }));
-                sender.send(bdata).expect("sending command");
+                if let Err(e) = up_writer.send(bdata) {
+                    warn!("sending command failed: {e}");
+                    let _ = up_status_tx.send("Connection closed".into());
+                    return;
+                }
             }
             Err(e) => {
                 // UI exited.
                 debug!("UI exited, up_rx got: {e}");
-                sender
-                    .send(make_writer.disconnect())
-                    .expect("failed to send disconnect");
+                if let Err(e) = up_writer.disconnect() {
+                    debug!("disconnecting terminal failed: {e}");
+                }
                 return;
             }
         }
@@ -515,7 +700,13 @@ fn main() -> Result<()> {
         let read = match con.read() {
             Ok(data) => data,
             Err(e) => {
-                if !relay_terminal_data(&zmodem_probe, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+                if !relay_terminal_data(
+                    &zmodem_probe,
+                    &cq_tx,
+                    &down_tx,
+                    &remote_label,
+                    &local_label,
+                )? {
                     break;
                 }
                 let _ = status_tx.send("Connection closed".into());
@@ -559,8 +750,8 @@ fn main() -> Result<()> {
                 &zmodem_probe[..offset],
                 &cq_tx,
                 &down_tx,
-                &opt.dst,
-                &opt.src,
+                &remote_label,
+                &local_label,
             )? {
                 break;
             }
@@ -568,7 +759,6 @@ fn main() -> Result<()> {
             zmodem_probe.clear();
             zmodem_active.store(true, Ordering::Release);
             match ZmodemReceiver::start(
-                zmodem_sender.clone(),
                 zmodem_writer.clone(),
                 Arc::clone(&zmodem_active),
                 status_tx.clone(),
@@ -587,7 +777,13 @@ fn main() -> Result<()> {
                     error!("starting rz failed: {e}");
                     zmodem_active.store(false, Ordering::Release);
                     let _ = status_tx.send("Unable to start rz".into());
-                    if !relay_terminal_data(&zmodem_data, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+                    if !relay_terminal_data(
+                        &zmodem_data,
+                        &cq_tx,
+                        &down_tx,
+                        &remote_label,
+                        &local_label,
+                    )? {
                         break;
                     }
                 }
@@ -597,7 +793,13 @@ fn main() -> Result<()> {
             let terminal_len = zmodem_probe.len() - retained;
             let terminal_data = zmodem_probe[..terminal_len].to_vec();
             zmodem_probe.drain(..terminal_len);
-            if !relay_terminal_data(&terminal_data, &cq_tx, &down_tx, &opt.dst, &opt.src)? {
+            if !relay_terminal_data(
+                &terminal_data,
+                &cq_tx,
+                &down_tx,
+                &remote_label,
+                &local_label,
+            )? {
                 break;
             }
         }
@@ -627,6 +829,7 @@ fn ascii7_to_str(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn finds_zmodem_start_sequence() {
@@ -643,5 +846,69 @@ mod tests {
         assert_eq!(zmodem_start_prefix_len(b"Disconnect"), 0);
         assert_eq!(zmodem_start_prefix_len(b"text**"), 2);
         assert_eq!(zmodem_start_prefix_len(b"**\x18B0"), 5);
+    }
+
+    #[test]
+    fn selects_tcp_without_agw_options() {
+        let options = Opts::try_parse_from(["term", "--tcp", "127.0.0.1:23"])
+            .expect("parsing TCP options")
+            .connection_options()
+            .expect("selecting TCP transport");
+        assert!(matches!(options, ConnectionOptions::Tcp { .. }));
+
+        let invalid = Opts::try_parse_from(["term", "--tcp", "127.0.0.1:23", "M0THC", "GB7CIP"])
+            .expect("parsing TCP options with callsigns");
+        assert!(invalid.connection_options().is_err());
+
+        let invalid = Opts::try_parse_from(["term", "--tcp", "127.0.0.1:23", "-p", "0"])
+            .expect("parsing TCP options with AGW port");
+        assert!(invalid.connection_options().is_err());
+
+        assert!(Opts::try_parse_from([
+            "term",
+            "--tcp",
+            "127.0.0.1:23",
+            "--agw-addr",
+            "127.0.0.1:8010",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn uses_agw_defaults_when_tcp_is_not_requested() {
+        let options = Opts::try_parse_from(["term", "M0THC", "GB7CIP"])
+            .expect("parsing AGW options")
+            .connection_options()
+            .expect("selecting AGW transport");
+        match options {
+            ConnectionOptions::Agw {
+                addr, port, pid, ..
+            } => {
+                assert_eq!(addr, DEFAULT_AGW_ADDR);
+                assert_eq!(port, Port(0));
+                assert_eq!(pid, Pid(240));
+            }
+            ConnectionOptions::Tcp { .. } => panic!("selected TCP instead of AGW"),
+        }
+    }
+
+    #[test]
+    fn tcp_transport_relays_raw_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binding TCP listener");
+        let addr = listener.local_addr().expect("reading listener address");
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accepting TCP client");
+            stream.write_all(b"hello").expect("writing TCP data");
+            let mut received = [0; 3];
+            stream.read_exact(&mut received).expect("reading TCP data");
+            assert_eq!(&received, b"bye");
+        });
+
+        let mut connection = TerminalConnection::tcp(&addr.to_string()).expect("connecting TCP");
+        let writer = connection.writer().expect("creating TCP writer");
+        assert_eq!(connection.read().expect("reading TCP data"), b"hello");
+        writer.send(b"bye".to_vec()).expect("sending TCP data");
+        writer.disconnect().expect("disconnecting TCP");
+        peer.join().expect("TCP peer thread failed");
     }
 }
