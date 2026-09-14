@@ -96,6 +96,14 @@ fn zmodem_start_offset(data: &[u8]) -> Option<usize> {
         .position(|window| window == ZMODEM_START)
 }
 
+fn zmodem_start_prefix_len(data: &[u8]) -> usize {
+    let max_len = data.len().min(ZMODEM_START.len() - 1);
+    (1..=max_len)
+        .rev()
+        .find(|&len| data[data.len() - len..] == ZMODEM_START[..len])
+        .unwrap_or(0)
+}
+
 fn relay_terminal_data(
     data: &[u8],
     cq_tx: &mpsc::Sender<CQLogEntry>,
@@ -486,7 +494,7 @@ fn main() -> Result<()> {
                 }
             }
         } else {
-            let retained = zmodem_probe.len().min(ZMODEM_START.len() - 1);
+            let retained = zmodem_start_prefix_len(&zmodem_probe);
             let terminal_len = zmodem_probe.len() - retained;
             let terminal_data = zmodem_probe[..terminal_len].to_vec();
             zmodem_probe.drain(..terminal_len);
@@ -529,5 +537,12 @@ mod tests {
     #[test]
     fn ignores_non_zmodem_terminal_data() {
         assert_eq!(zmodem_start_offset(b"sz some-file.txt\r"), None);
+    }
+
+    #[test]
+    fn retains_only_a_possible_zmodem_start_prefix() {
+        assert_eq!(zmodem_start_prefix_len(b"Disconnect"), 0);
+        assert_eq!(zmodem_start_prefix_len(b"text**"), 2);
+        assert_eq!(zmodem_start_prefix_len(b"**\x18B0"), 5);
     }
 }
