@@ -13,10 +13,12 @@ use anyhow::{Error, Result};
 use clap::Parser;
 use cursive::align::Align;
 use cursive::theme::{Color, ColorStyle, ColorType};
-use cursive::view::{Nameable, Resizable, ScrollStrategy};
+use cursive::view::{Nameable, Resizable, ScrollStrategy, View, ViewWrapper};
 use cursive::views::{
-    Dialog, EditView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
+    Dialog, EditView, EnableableView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
 };
+use cursive::wrap_impl;
+use cursive::Printer;
 use log::{debug, error, warn};
 use serde::Serialize;
 
@@ -149,6 +151,46 @@ enum ZmodemExit {
 enum StatusUpdate {
     Message(String),
     Terminated(String),
+}
+
+struct StatusView {
+    view: TextView,
+    terminated: bool,
+}
+
+impl StatusView {
+    fn new(content: TextContent) -> Self {
+        Self {
+            view: TextView::new_with_content(content),
+            terminated: false,
+        }
+    }
+
+    fn mark_terminated(&mut self) {
+        self.terminated = true;
+    }
+}
+
+impl ViewWrapper for StatusView {
+    wrap_impl!(self.view: TextView);
+
+    fn wrap_draw(&self, printer: &Printer) {
+        let style = if self.terminated {
+            ColorStyle::new(
+                ColorType::Color(Color::Dark(cursive::theme::BaseColor::White)),
+                ColorType::Color(Color::Dark(cursive::theme::BaseColor::Red)),
+            )
+        } else {
+            ColorStyle::primary()
+        };
+        printer.with_style(style, |printer| {
+            let blank = " ".repeat(printer.size.x);
+            for y in 0..printer.size.y {
+                printer.print((0, y), &blank);
+            }
+            self.view.draw(printer);
+        });
+    }
 }
 
 #[derive(Default)]
@@ -506,6 +548,8 @@ fn run_ui(
 
     let status = TextContent::new("");
     let status2 = status.clone();
+    let connection_terminated = Arc::new(AtomicBool::new(false));
+    let submit_terminated = Arc::clone(&connection_terminated);
 
     siv.set_window_title("AGW Terminal");
     siv.with_theme(|t| {
@@ -561,29 +605,31 @@ fn run_ui(
     siv.add_fullscreen_layer(
         LinearLayout::vertical()
             .child(
-                Dialog::around(
-                    TextView::new_with_content(status)
-                        .full_width()
-                        .with_name("status"),
-                )
-                .title("Status"),
+                Dialog::around(StatusView::new(status).with_name("status").full_width())
+                    .title("Status"),
             )
             .child(scr)
             .child(
                 Dialog::around(
-                    EditView::new()
-                        .on_submit(move |s, text| {
-                            up_tx.send(text.to_owned() + "\r").expect("Sending command");
-                            s.call_on_name("edit", |e: &mut EditView| {
-                                e.set_content("");
+                    EnableableView::new(
+                        EditView::new()
+                            .on_submit(move |s, text| {
+                                if submit_terminated.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                up_tx.send(text.to_owned() + "\r").expect("Sending command");
+                                s.call_on_name("edit", |e: &mut EditView| {
+                                    e.set_content("");
+                                })
+                                .expect("call on name");
                             })
-                            .expect("call on name");
-                        })
-                        .style(ColorStyle::new(
-                            ColorType::Color(Color::Rgb(0, 0, 0)),
-                            ColorType::Color(Color::Rgb(200, 200, 200)),
-                        ))
-                        .with_name("edit"),
+                            .style(ColorStyle::new(
+                                ColorType::Color(Color::Rgb(0, 0, 0)),
+                                ColorType::Color(Color::Rgb(200, 200, 200)),
+                            ))
+                            .with_name("edit"),
+                    )
+                    .with_name("edit-container"),
                 )
                 .title("input")
                 .button("Quit", move |s| {
@@ -608,13 +654,20 @@ fn run_ui(
             status2.set_content(ascii7_to_str(text.as_bytes()));
             if is_terminated && !terminated {
                 terminated = true;
+                connection_terminated.store(true, Ordering::Release);
                 if status_sink
                     .send(Box::new(|s| {
-                        let _ = s.call_on_name("status", |view: &mut TextView| {
-                            view.set_style(ColorStyle::new(
-                                ColorType::Color(Color::Dark(cursive::theme::BaseColor::White)),
-                                ColorType::Color(Color::Dark(cursive::theme::BaseColor::Red)),
-                            ));
+                        let _ = s.call_on_name("status", |view: &mut StatusView| {
+                            view.mark_terminated();
+                        });
+                        let _ = s.call_on_name(
+                            "edit-container",
+                            |view: &mut EnableableView<EditView>| {
+                                view.set_enabled(false);
+                            },
+                        );
+                        let _ = s.call_on_name("edit", |view: &mut EditView| {
+                            view.disable();
                         });
                     }))
                     .is_err()
