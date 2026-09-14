@@ -247,6 +247,7 @@ impl ZmodemReceiver {
                 "--protect",
                 "--zmodem",
                 "--verbose",
+                "--verbose",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
