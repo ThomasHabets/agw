@@ -145,6 +145,12 @@ enum ZmodemExit {
     Cancelled,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StatusUpdate {
+    Message(String),
+    Terminated(String),
+}
+
 #[derive(Default)]
 struct RzProgressDecoder {
     line: String,
@@ -211,7 +217,7 @@ impl RzProgressDecoder {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<String>) {
+fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<StatusUpdate>) {
     let mut decoder = RzProgressDecoder::default();
     let mut buffer = [0_u8; 1024];
     loop {
@@ -224,13 +230,13 @@ fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<String>) {
             }
         };
         if let Some(status) = decoder.decode(&buffer[..read]) {
-            if status_tx.send(status).is_err() {
+            if status_tx.send(StatusUpdate::Message(status)).is_err() {
                 return;
             }
         }
     }
     if let Some(status) = decoder.finish() {
-        let _ = status_tx.send(status);
+        let _ = status_tx.send(StatusUpdate::Message(status));
     }
 }
 
@@ -239,7 +245,7 @@ impl ZmodemReceiver {
     fn start(
         writer: TerminalWriter,
         active: Arc<AtomicBool>,
-        status_tx: mpsc::Sender<String>,
+        status_tx: mpsc::Sender<StatusUpdate>,
     ) -> Result<Self> {
         let mut child = Command::new("rz")
             .args([
@@ -270,7 +276,7 @@ impl ZmodemReceiver {
             .take()
             .ok_or_else(|| Error::msg("rz did not provide stderr"))?;
 
-        let _ = status_tx.send("Receiving ZMODEM files".into());
+        let _ = status_tx.send(StatusUpdate::Message("Receiving ZMODEM files".into()));
 
         std::thread::spawn(move || {
             let mut buf = [0_u8; 1024];
@@ -309,9 +315,12 @@ impl ZmodemReceiver {
                         }
                         active.store(false, Ordering::Release);
                         if status.success() {
-                            let _ = status_tx.send("ZMODEM receive completed".into());
+                            let _ = status_tx
+                                .send(StatusUpdate::Message("ZMODEM receive completed".into()));
                         } else {
-                            let _ = status_tx.send(format!("ZMODEM receive failed: {status}"));
+                            let _ = status_tx.send(StatusUpdate::Message(format!(
+                                "ZMODEM receive failed: {status}"
+                            )));
                         }
                         let _ = completion_tx.send(ZmodemExit::Exited(status));
                         return;
@@ -327,7 +336,9 @@ impl ZmodemReceiver {
                         }
                         active.store(false, Ordering::Release);
                         let message = format!("waiting for rz failed: {error}");
-                        let _ = status_tx.send(format!("ZMODEM receive failed: {message}"));
+                        let _ = status_tx.send(StatusUpdate::Message(format!(
+                            "ZMODEM receive failed: {message}"
+                        )));
                         let _ = completion_tx.send(ZmodemExit::Failed(message));
                         return;
                     }
@@ -343,7 +354,8 @@ impl ZmodemReceiver {
                             }
                         }
                         active.store(false, Ordering::Release);
-                        let _ = status_tx.send("ZMODEM receive cancelled".into());
+                        let _ = status_tx
+                            .send(StatusUpdate::Message("ZMODEM receive cancelled".into()));
                         let _ = completion_tx.send(ZmodemExit::Cancelled);
                         return;
                     }
@@ -470,10 +482,11 @@ fn relay_terminal_text(
     Ok(true)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_ui(
     up_tx: mpsc::Sender<String>,
     down_rx: mpsc::Receiver<String>,
-    status_rx: mpsc::Receiver<String>,
+    status_rx: mpsc::Receiver<StatusUpdate>,
 ) {
     let mut siv = cursive::default();
     siv.set_fps(10);
@@ -547,7 +560,14 @@ fn run_ui(
 
     siv.add_fullscreen_layer(
         LinearLayout::vertical()
-            .child(Dialog::around(TextView::new_with_content(status)).title("Status"))
+            .child(
+                Dialog::around(
+                    TextView::new_with_content(status)
+                        .full_width()
+                        .with_name("status"),
+                )
+                .title("Status"),
+            )
             .child(scr)
             .child(
                 Dialog::around(
@@ -572,14 +592,36 @@ fn run_ui(
             )
             .full_screen(),
     );
+    let status_sink = siv.cb_sink().clone();
     std::thread::spawn(move || {
         std::panic::set_hook(Box::new(|panic_info| {
             let backtrace = backtrace::Backtrace::new();
             error!("Status update thread panic: {panic_info:?}. Backtrace:");
             error!("{backtrace:?}");
         }));
-        for c in status_rx {
-            status2.set_content(ascii7_to_str(c.as_bytes()));
+        let mut terminated = false;
+        for update in status_rx {
+            let (text, is_terminated) = match update {
+                StatusUpdate::Message(text) => (text, false),
+                StatusUpdate::Terminated(text) => (text, true),
+            };
+            status2.set_content(ascii7_to_str(text.as_bytes()));
+            if is_terminated && !terminated {
+                terminated = true;
+                if status_sink
+                    .send(Box::new(|s| {
+                        let _ = s.call_on_name("status", |view: &mut TextView| {
+                            view.set_style(ColorStyle::new(
+                                ColorType::Color(Color::Dark(cursive::theme::BaseColor::White)),
+                                ColorType::Color(Color::Dark(cursive::theme::BaseColor::Red)),
+                            ));
+                        });
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     });
     siv.run();
@@ -815,7 +857,7 @@ fn main() -> Result<()> {
     };
     let initial_status = con.connect_string()?;
     status_tx
-        .send(initial_status)
+        .send(StatusUpdate::Message(initial_status))
         .expect("sending initial status");
     let ui_thread = std::thread::spawn(move || {
         std::panic::set_hook(Box::new(|panic_info| {
@@ -840,8 +882,9 @@ fn main() -> Result<()> {
         match up_rx.recv() {
             Ok(data) => {
                 if up_zmodem_active.load(Ordering::Acquire) {
-                    let _ = up_status_tx
-                        .send("ZMODEM receive is still active; command not sent".into());
+                    let _ = up_status_tx.send(StatusUpdate::Message(
+                        "ZMODEM receive is still active; command not sent".into(),
+                    ));
                     continue;
                 }
                 let bdata = data.as_bytes().to_vec();
@@ -852,7 +895,7 @@ fn main() -> Result<()> {
                 }));
                 if let Err(e) = up_writer.send(bdata) {
                     warn!("sending command failed: {e}");
-                    let _ = up_status_tx.send("Connection closed".into());
+                    let _ = up_status_tx.send(StatusUpdate::Terminated("Connection closed".into()));
                     return;
                 }
             }
@@ -892,7 +935,7 @@ fn main() -> Result<()> {
                 )? {
                     break;
                 }
-                let _ = status_tx.send("Connection closed".into());
+                let _ = status_tx.send(StatusUpdate::Terminated("Connection closed".into()));
                 debug!("Connection read: {e}");
                 // TODO: update connected status box.
                 break;
@@ -912,14 +955,15 @@ fn main() -> Result<()> {
                         warn!("writing received data to rz failed: {e}");
                         zmodem_active.store(false, Ordering::Release);
                         zmodem_receiver = None;
-                        let _ = status_tx.send("ZMODEM receive failed".into());
+                        let _ =
+                            status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
                     }
                 },
                 Err(e) => {
                     warn!("checking rz status failed: {e}");
                     zmodem_active.store(false, Ordering::Release);
                     zmodem_receiver = None;
-                    let _ = status_tx.send("ZMODEM receive failed".into());
+                    let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
                 }
             }
         }
@@ -951,7 +995,8 @@ fn main() -> Result<()> {
                     if let Err(e) = receiver.write(&zmodem_data) {
                         warn!("writing ZMODEM header to rz failed: {e}");
                         zmodem_active.store(false, Ordering::Release);
-                        let _ = status_tx.send("ZMODEM receive failed".into());
+                        let _ =
+                            status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
                     } else {
                         zmodem_receiver = Some(receiver);
                     }
@@ -959,7 +1004,7 @@ fn main() -> Result<()> {
                 Err(e) => {
                     error!("starting rz failed: {e}");
                     zmodem_active.store(false, Ordering::Release);
-                    let _ = status_tx.send("Unable to start rz".into());
+                    let _ = status_tx.send(StatusUpdate::Message("Unable to start rz".into()));
                     if !relay_terminal_data(
                         &zmodem_data,
                         &mut terminal_text,
@@ -1070,7 +1115,10 @@ mod tests {
     fn rz_progress_forwards_the_last_partial_line_at_eof() {
         let (status_tx, status_rx) = mpsc::channel();
         forward_rz_progress(Cursor::new(b"Receiving 10%\rReceiving 20%"), status_tx);
-        assert_eq!(status_rx.try_iter().last(), Some("Receiving 20%".into()));
+        assert_eq!(
+            status_rx.try_iter().last(),
+            Some(StatusUpdate::Message("Receiving 20%".into()))
+        );
     }
 
     #[test]
