@@ -275,17 +275,64 @@ fn zmodem_start_prefix_len(data: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
+#[derive(Default)]
+struct TerminalTextDecoder {
+    pending_carriage_return: bool,
+}
+
+impl TerminalTextDecoder {
+    fn decode(&mut self, data: &[u8]) -> String {
+        let mut plain = String::new();
+        for &byte in data {
+            if byte == 0 {
+                continue;
+            }
+            if self.pending_carriage_return {
+                self.pending_carriage_return = false;
+                plain.push('\n');
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+            match byte {
+                b'\r' => self.pending_carriage_return = true,
+                byte => plain.push((byte & 0x7f) as char),
+            }
+        }
+        plain
+    }
+
+    fn finish(&mut self) -> String {
+        if self.pending_carriage_return {
+            self.pending_carriage_return = false;
+            "\n".to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
 fn relay_terminal_data(
     data: &[u8],
+    decoder: &mut TerminalTextDecoder,
     cq_tx: &mpsc::Sender<CQLogEntry>,
     down_tx: &mpsc::Sender<String>,
     src: &str,
     dst: &str,
 ) -> Result<bool> {
-    if data.is_empty() {
+    relay_terminal_text(decoder.decode(data), cq_tx, down_tx, src, dst)
+}
+
+fn relay_terminal_text(
+    plain: String,
+    cq_tx: &mpsc::Sender<CQLogEntry>,
+    down_tx: &mpsc::Sender<String>,
+    src: &str,
+    dst: &str,
+) -> Result<bool> {
+    if plain.is_empty() {
         return Ok(true);
     }
-    let plain = ascii7_to_str(data);
     cq_tx.send(CQLogEntry::message(CQLogEntryMessage {
         src: src.to_string(),
         dst: dst.to_string(),
@@ -696,12 +743,23 @@ fn main() -> Result<()> {
     });
     let mut zmodem_receiver: Option<ZmodemReceiver> = None;
     let mut zmodem_probe = Vec::new();
+    let mut terminal_text = TerminalTextDecoder::default();
     loop {
         let read = match con.read() {
             Ok(data) => data,
             Err(e) => {
                 if !relay_terminal_data(
                     &zmodem_probe,
+                    &mut terminal_text,
+                    &cq_tx,
+                    &down_tx,
+                    &remote_label,
+                    &local_label,
+                )? {
+                    break;
+                }
+                if !relay_terminal_text(
+                    terminal_text.finish(),
                     &cq_tx,
                     &down_tx,
                     &remote_label,
@@ -748,6 +806,7 @@ fn main() -> Result<()> {
         if let Some(offset) = zmodem_start_offset(&zmodem_probe) {
             if !relay_terminal_data(
                 &zmodem_probe[..offset],
+                &mut terminal_text,
                 &cq_tx,
                 &down_tx,
                 &remote_label,
@@ -779,6 +838,7 @@ fn main() -> Result<()> {
                     let _ = status_tx.send("Unable to start rz".into());
                     if !relay_terminal_data(
                         &zmodem_data,
+                        &mut terminal_text,
                         &cq_tx,
                         &down_tx,
                         &remote_label,
@@ -795,6 +855,7 @@ fn main() -> Result<()> {
             zmodem_probe.drain(..terminal_len);
             if !relay_terminal_data(
                 &terminal_data,
+                &mut terminal_text,
                 &cq_tx,
                 &down_tx,
                 &remote_label,
@@ -846,6 +907,21 @@ mod tests {
         assert_eq!(zmodem_start_prefix_len(b"Disconnect"), 0);
         assert_eq!(zmodem_start_prefix_len(b"text**"), 2);
         assert_eq!(zmodem_start_prefix_len(b"**\x18B0"), 5);
+    }
+
+    #[test]
+    fn normalizes_crlf_across_terminal_reads() {
+        let mut decoder = TerminalTextDecoder::default();
+        assert_eq!(decoder.decode(b"first\r"), "first");
+        assert_eq!(decoder.decode(b"\nsecond\r\nthird"), "\nsecond\nthird");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn finishes_a_lone_carriage_return_as_a_newline() {
+        let mut decoder = TerminalTextDecoder::default();
+        assert_eq!(decoder.decode(b"last\r"), "last");
+        assert_eq!(decoder.finish(), "\n");
     }
 
     #[test]
