@@ -44,7 +44,7 @@ enum TcpWrite {
     Disconnect,
 }
 
-impl<'a> TerminalConnection<'a> {
+impl TerminalConnection<'_> {
     fn tcp(addr: &str) -> Result<Self> {
         Ok(Self::Tcp(TcpStream::connect(addr)?))
     }
@@ -210,6 +210,7 @@ impl RzProgressDecoder {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<String>) {
     let mut decoder = RzProgressDecoder::default();
     let mut buffer = [0_u8; 1024];
@@ -234,6 +235,7 @@ fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<String>) {
 }
 
 impl ZmodemReceiver {
+    #[allow(clippy::too_many_lines)]
     fn start(
         writer: TerminalWriter,
         active: Arc<AtomicBool>,
@@ -242,6 +244,8 @@ impl ZmodemReceiver {
         let mut child = Command::new("rz")
             .args([
                 "--binary",
+                "-t",
+                "1000", // 100 seconds.
                 "--restricted",
                 "--restricted",
                 "--protect",
