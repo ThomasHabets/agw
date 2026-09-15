@@ -2,7 +2,8 @@ use crate::{Error, Result};
 
 /// Callsign, including SSID.
 ///
-/// Max length is 10, because that's the max length in the AGW protocol.
+/// The wire field is ten bytes including its NUL terminator, so the callsign
+/// itself is at most nine ASCII bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Call {
     bytes: [u8; 10],
@@ -21,12 +22,21 @@ impl Call {
                 "callsign '{bytes:?}' is longer than 10 characters"
             )));
         }
+        let bytes = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .map_or(bytes, |terminator| &bytes[..terminator]);
+        if bytes.len() > 9 {
+            return Err(Error::Msg(format!(
+                "callsign '{bytes:?}' is longer than 9 characters"
+            )));
+        }
         // NOTE: Callsigns here are not just real callsigns, but also
         // virtual ones like WIDE1-1 and APZ001.
         let mut arr = [0; 10];
         for (i, &item) in bytes.iter().enumerate() {
             // TODO: is slash valid?
-            if item != 0 && !item.is_ascii_alphanumeric() && item != b'-' {
+            if !item.is_ascii_alphanumeric() && item != b'-' {
                 return Err(Error::Msg(format!(
                     "callsign includes invalid character {item:?}"
                 )));
@@ -46,7 +56,12 @@ impl Call {
     #[must_use]
     pub fn as_str(&self) -> &str {
         #[allow(clippy::missing_panics_doc)]
-        str::from_utf8(&self.bytes).expect("can't happen: call contains non-UTF8")
+        let end = self
+            .bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(self.bytes.len());
+        str::from_utf8(&self.bytes[..end]).expect("can't happen: call contains non-UTF8")
     }
 
     /// Return true if the callsign is empty.
@@ -82,5 +97,24 @@ impl std::fmt::Display for Call {
         }
         let s = String::from_utf8(self.bytes.to_vec()).expect("parsing string");
         write!(f, "{s}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_a_ten_byte_callsign_without_a_terminator() {
+        assert!(Call::from_bytes(b"ABCDEFGHIJ").is_err());
+    }
+
+    #[test]
+    fn trims_a_wire_field_at_its_terminator() {
+        let call = Call::from_bytes(b"N0CALL\0xyz").unwrap();
+
+        assert_eq!(call.as_str(), "N0CALL");
+        assert_eq!(call.to_string(), "N0CALL");
+        assert_eq!(&call.as_bytes()[..7], b"N0CALL\0");
     }
 }
