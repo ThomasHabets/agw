@@ -12,7 +12,7 @@ use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpStream,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{parse_header, Call, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
@@ -50,6 +50,7 @@ impl Drop for RuleHandle {
 pub enum RuleMatch {
     Data { port: Port, src: Call, dst: Call },
     ConnectionEstablished { port: Port, src: Call, dst: Call },
+    ConnectionOutcome { port: Port, src: Call, dst: Call },
     IncomingConnect { port: Port, dst: Call },
     RegisterCallsign { call: Call },
 }
@@ -127,6 +128,24 @@ impl RuleMatch {
                     pid: _,
                     src: src2,
                     dst: dst2,
+                } = packet
+                {
+                    return port == port2 && src == src2 && dst == dst2;
+                }
+            }
+            RuleMatch::ConnectionOutcome { port, src, dst } => {
+                if let Packet::ConnectionEstablished {
+                    port: port2,
+                    pid: _,
+                    src: src2,
+                    dst: dst2,
+                }
+                | Packet::ConnectionFailed {
+                    port: port2,
+                    pid: _,
+                    src: src2,
+                    dst: dst2,
+                    message: _,
                 } = packet
                 {
                     return port == port2 && src == src2 && dst == dst2;
@@ -375,6 +394,7 @@ impl Default for Router {
 /// This is the gateway between the AGW TCP stream and the `Router`.
 struct Pipo {
     tx: mpsc::Sender<Packet>,
+    error: watch::Receiver<Option<Error>>,
     //rx: tokio::sync::Mutex<mpsc::Receiver<Packet>>,
 }
 
@@ -382,21 +402,27 @@ impl Pipo {
     fn new(con: TcpStream, router: Arc<Router>) -> Result<Self> {
         //let (tx1, rx1) = mpsc::channel(10); // TODO: magic number.
         let (tx2, rx2) = mpsc::channel(10); // TODO: magic number.
+        let (error_tx, error) = watch::channel(None);
         router.set_outgoing(tx2.clone())?;
 
         // TODO: probably should split this task in two.
         tokio::spawn(async move {
-            Self::run(con, router, rx2)
-                .await
-                .expect("Pipo run() failed");
+            if let Err(error) = Self::run(con, router, rx2).await {
+                let _ = error_tx.send(Some(error));
+            }
         });
         Ok(Pipo {
             tx: tx2,
+            error,
             //rx: tokio::sync::Mutex::new(rx1),
         })
     }
     async fn send(&self, packet: Packet) -> Result<()> {
         self.tx.send(packet).await.map_err(Error::other)
+    }
+
+    fn error_receiver(&self) -> watch::Receiver<Option<Error>> {
+        self.error.clone()
     }
     /*    async fn recv(&self) -> Option<Packet> {
         self.rx.lock().await.recv().await
@@ -639,7 +665,7 @@ impl AGW {
 
         // Register rule for receiving connection established.
         let ident = self.router.add(
-            RuleMatch::ConnectionEstablished {
+            RuleMatch::ConnectionOutcome {
                 port,
                 src: dst.clone(),
                 dst: src.clone(),
@@ -681,10 +707,21 @@ impl AGW {
         }
 
         // Wait for connection established.
-        let estab = tokio::time::timeout(CONNECTION_TIMEOUT, rx.recv())
-            .await
-            .map_err(Error::other)?
-            .ok_or(Error::msg("no packet"));
+        let mut transport_error = self.con.error_receiver();
+        let estab = tokio::time::timeout(CONNECTION_TIMEOUT, async {
+            tokio::select! {
+                reply = rx.recv() => reply.ok_or(Error::msg("no connection reply")),
+                changed = transport_error.changed() => {
+                    changed.map_err(Error::other)?;
+                    Err(transport_error
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| Error::msg("AGW transport stopped")))
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::msg("connection attempt timed out"))?;
         drop(ident);
 
         let estab = estab?;
@@ -707,9 +744,12 @@ impl AGW {
                     None,
                 ))
             }
-            other => {
-                panic!("received unexpected packet: {other:?}")
+            Packet::ConnectionFailed { message, .. } => {
+                Err(Error::msg(format!("connection failed: {message}")))
             }
+            other => Err(Error::msg(format!(
+                "unexpected connection reply: {other:?}"
+            ))),
         }
     }
 }
@@ -1028,5 +1068,29 @@ impl AsyncWrite for Connection<'_> {
             this.pending_shutdown = Some(this.send_future(this.disconnect_packet()));
         }
         this.poll_pending_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_outcome_rule_matches_failure() {
+        let remote: Call = "REMOTE".parse().unwrap();
+        let local: Call = "LOCAL".parse().unwrap();
+        let rule = RuleMatch::ConnectionOutcome {
+            port: Port(1),
+            src: remote.clone(),
+            dst: local.clone(),
+        };
+
+        assert!(rule.matches(&Packet::ConnectionFailed {
+            port: Port(1),
+            pid: Pid(0),
+            src: remote,
+            dst: local,
+            message: "*** RETRYOUT".into(),
+        }));
     }
 }
