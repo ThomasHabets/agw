@@ -450,7 +450,7 @@ impl Pipo {
                 Vec::new()
             };
             let packet = Packet::parse(&header, &payload)?;
-            debug!("agw/pipo: Processing packet len {}", header.data_len);
+            trace!("agw/pipo: Processing packet len {}", header.data_len);
             trace!("agw/pipo: Processing packet {packet:?}");
             router.process(packet).await?;
         }
