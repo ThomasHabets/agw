@@ -1,3 +1,7 @@
+## General
+
+* One logical change per commit
+
 ## Commit messages
 
 * Max 72 characters per line

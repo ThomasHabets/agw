@@ -530,6 +530,9 @@ impl Packet {
                             dst,
                         }
                     } else {
+                        // Is a `C` with a nonstandard message really the way
+                        // connection failed is communicated? Seems to me that
+                        // it should be a `d` frame, no?
                         debug!("agw: Got ConnectionFailed {s}");
                         Packet::ConnectionFailed {
                             port: header.port,

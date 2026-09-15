@@ -206,6 +206,9 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             if connection.data.starts_with("*** CONNECTED") {
                 Reply::ConnectionEstablished(connection)
             } else {
+                // Is a `C` with a nonstandard message really the way connection
+                // failed is communicated? Seems to me that it should be a `d`
+                // frame, no?
                 Reply::ConnectionFailed(connection)
             }
         }
