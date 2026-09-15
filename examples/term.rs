@@ -1,12 +1,13 @@
 use std::{
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    process::{ChildStdin, Command, ExitStatus, Stdio},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Error, Result};
@@ -21,6 +22,7 @@ use cursive::wrap_impl;
 use cursive::Printer;
 use log::{debug, error, warn};
 use serde::Serialize;
+use zmodem2::{Action, Event, Receiver};
 
 use agw::{Call, Pid, Port};
 
@@ -136,15 +138,26 @@ impl TerminalWriter {
 }
 
 struct ZmodemReceiver {
-    stdin: ChildStdin,
+    input: mpsc::Sender<Vec<u8>>,
     completion: mpsc::Receiver<ZmodemExit>,
     cancel: mpsc::Sender<()>,
 }
 
 enum ZmodemExit {
-    Exited(ExitStatus),
+    Completed,
     Failed(String),
     Cancelled,
+}
+
+struct ZmodemFile {
+    name: String,
+    final_path: PathBuf,
+    part_path: PathBuf,
+    file: File,
+    size: Option<u32>,
+    written: u64,
+    started: Instant,
+    last_status: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -193,243 +206,44 @@ impl ViewWrapper for StatusView {
     }
 }
 
-#[derive(Default)]
-struct RzProgressDecoder {
-    line: String,
-    escape: RzEscape,
-}
-
-#[derive(Default)]
-enum RzEscape {
-    #[default]
-    None,
-    Escape,
-    Csi,
-}
-
-impl RzProgressDecoder {
-    fn decode(&mut self, data: &[u8]) -> Option<String> {
-        let mut latest = None;
-        for &byte in data {
-            match self.escape {
-                RzEscape::Escape => {
-                    self.escape = if byte == b'[' {
-                        RzEscape::Csi
-                    } else {
-                        RzEscape::None
-                    };
-                    continue;
-                }
-                RzEscape::Csi => {
-                    if (0x40..=0x7e).contains(&byte) {
-                        self.escape = RzEscape::None;
-                    }
-                    continue;
-                }
-                RzEscape::None => {}
-            }
-
-            match byte {
-                b'\x1b' => self.escape = RzEscape::Escape,
-                b'\r' | b'\n' => {
-                    if !self.line.is_empty() {
-                        latest = Some(self.line.clone());
-                        self.line.clear();
-                    }
-                }
-                b'\x08' => {
-                    self.line.pop();
-                    if !self.line.is_empty() {
-                        latest = Some(self.line.clone());
-                    }
-                }
-                0x20..=0x7e => {
-                    self.line.push(byte.into());
-                    latest = Some(self.line.clone());
-                }
-                _ => {}
-            }
-        }
-        latest
-    }
-
-    fn finish(&mut self) -> Option<String> {
-        (!self.line.is_empty()).then(|| std::mem::take(&mut self.line))
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn forward_rz_progress(mut stderr: impl Read, status_tx: mpsc::Sender<StatusUpdate>) {
-    let mut decoder = RzProgressDecoder::default();
-    let mut buffer = [0_u8; 1024];
-    loop {
-        let read = match stderr.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(e) => {
-                warn!("reading rz progress failed: {e}");
-                return;
-            }
-        };
-        if let Some(status) = decoder.decode(&buffer[..read]) {
-            if status_tx.send(StatusUpdate::Message(status)).is_err() {
-                return;
-            }
-        }
-    }
-    if let Some(status) = decoder.finish() {
-        let _ = status_tx.send(StatusUpdate::Message(status));
-    }
-}
-
 impl ZmodemReceiver {
-    #[allow(clippy::too_many_lines)]
     fn start(
         writer: TerminalWriter,
         active: Arc<AtomicBool>,
         status_tx: mpsc::Sender<StatusUpdate>,
-    ) -> Result<Self> {
-        let mut child = Command::new("rz")
-            .args([
-                "--binary",
-                "-t",
-                "1000", // 100 seconds.
-                "--restricted",
-                "--restricted",
-                "--protect",
-                "--zmodem",
-                "--verbose",
-                "--verbose",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| Error::msg("rz did not provide stdin"))?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| Error::msg("rz did not provide stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| Error::msg("rz did not provide stderr"))?;
-
-        let _ = status_tx.send(StatusUpdate::Message("Receiving ZMODEM files".into()));
-
-        std::thread::spawn(move || {
-            let mut buf = [0_u8; 1024];
-            loop {
-                let n = match stdout.read(&mut buf) {
-                    Ok(0) => return,
-                    Ok(n) => n,
-                    Err(e) => {
-                        warn!("reading rz output failed: {e}");
-                        return;
-                    }
-                };
-                if let Err(e) = writer.send(buf[..n].to_vec()) {
-                    warn!("sending rz output failed: {e}");
-                    return;
-                }
-            }
-        });
-
-        let progress_status_tx = status_tx.clone();
-        let progress_reader = std::thread::spawn(move || {
-            forward_rz_progress(stderr, progress_status_tx);
-        });
-
+    ) -> Self {
+        let (input, input_rx) = mpsc::channel();
         let (completion_tx, completion) = mpsc::channel();
         let (cancel, cancel_rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut progress_reader = Some(progress_reader);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        if let Some(reader) = progress_reader.take() {
-                            if let Err(e) = reader.join() {
-                                warn!("rz progress reader panicked: {e:?}");
-                            }
-                        }
-                        active.store(false, Ordering::Release);
-                        if status.success() {
-                            let _ = status_tx
-                                .send(StatusUpdate::Message("ZMODEM receive completed".into()));
-                        } else {
-                            let _ = status_tx.send(StatusUpdate::Message(format!(
-                                "ZMODEM receive failed: {status}"
-                            )));
-                        }
-                        let _ = completion_tx.send(ZmodemExit::Exited(status));
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        if let Some(reader) = progress_reader.take() {
-                            if let Err(e) = reader.join() {
-                                warn!("rz progress reader panicked: {e:?}");
-                            }
-                        }
-                        active.store(false, Ordering::Release);
-                        let message = format!("waiting for rz failed: {error}");
-                        let _ = status_tx.send(StatusUpdate::Message(format!(
-                            "ZMODEM receive failed: {message}"
-                        )));
-                        let _ = completion_tx.send(ZmodemExit::Failed(message));
-                        return;
-                    }
-                }
-
-                match cancel_rx.recv_timeout(Duration::from_millis(20)) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        if let Some(reader) = progress_reader.take() {
-                            if let Err(e) = reader.join() {
-                                warn!("rz progress reader panicked: {e:?}");
-                            }
-                        }
-                        active.store(false, Ordering::Release);
-                        let _ = status_tx
-                            .send(StatusUpdate::Message("ZMODEM receive cancelled".into()));
-                        let _ = completion_tx.send(ZmodemExit::Cancelled);
-                        return;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-            }
+            let result = run_zmodem_receiver(writer, input_rx, cancel_rx, status_tx);
+            active.store(false, Ordering::Release);
+            let _ = completion_tx.send(result);
         });
-
-        Ok(Self {
-            stdin,
+        Self {
+            input,
             completion,
             cancel,
-        })
+        }
     }
 
     fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.stdin.write_all(data)?;
-        self.stdin.flush()?;
-        Ok(())
+        self.input
+            .send(data.to_vec())
+            .map_err(|e| Error::msg(format!("sending ZMODEM data failed: {e}")))
     }
 
     fn finished(&self) -> Result<bool> {
         match self.completion.try_recv() {
-            Ok(ZmodemExit::Exited(status)) => {
-                debug!("rz exited with {status}");
+            Ok(ZmodemExit::Completed) => {
+                debug!("ZMODEM receive completed");
                 Ok(true)
             }
             Ok(ZmodemExit::Failed(message)) => Err(Error::msg(message)),
             Ok(ZmodemExit::Cancelled) => Ok(true),
             Err(mpsc::TryRecvError::Empty) => Ok(false),
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(Error::msg("rz completion monitor stopped unexpectedly"))
+                Err(Error::msg("ZMODEM receiver stopped unexpectedly"))
             }
         }
     }
@@ -438,6 +252,197 @@ impl ZmodemReceiver {
 impl Drop for ZmodemReceiver {
     fn drop(&mut self) {
         let _ = self.cancel.send(());
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_zmodem_receiver(
+    writer: TerminalWriter,
+    input: mpsc::Receiver<Vec<u8>>,
+    cancel: mpsc::Receiver<()>,
+    status_tx: mpsc::Sender<StatusUpdate>,
+) -> ZmodemExit {
+    let mut receiver = match Receiver::new() {
+        Ok(receiver) => receiver,
+        Err(e) => return ZmodemExit::Failed(format!("creating ZMODEM receiver failed: {e}")),
+    };
+    receiver.set_manual_file_accept(true);
+    let _ = status_tx.send(StatusUpdate::Message("Receiving ZMODEM files".into()));
+    let mut file = None;
+    loop {
+        match cancel.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = receiver.abort();
+                let _ = drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file);
+                let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive cancelled".into()));
+                return ZmodemExit::Cancelled;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        match drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file) {
+            Ok(Some(exit)) => return exit,
+            Ok(None) => {}
+            Err(e) => {
+                let message = format!("ZMODEM receive failed: {e}");
+                let _ = status_tx.send(StatusUpdate::Message(message.clone()));
+                return ZmodemExit::Failed(message);
+            }
+        }
+        match input.recv_timeout(Duration::from_secs(1)) {
+            Ok(data) => {
+                let mut offset = 0;
+                while offset < data.len() {
+                    match receiver.submit_wire(&data[offset..]) {
+                        Ok(0) => break,
+                        Ok(consumed) => offset += consumed,
+                        Err(e) => {
+                            return ZmodemExit::Failed(format!(
+                                "processing ZMODEM data failed: {e}"
+                            ))
+                        }
+                    }
+                    if let Ok(Some(exit)) =
+                        drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file)
+                    {
+                        return exit;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(e) = receiver.timeout() {
+                    return ZmodemExit::Failed(format!("ZMODEM timeout failed: {e}"));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ZmodemExit::Cancelled,
+        }
+    }
+}
+
+fn drain_zmodem_actions(
+    receiver: &mut Receiver,
+    writer: &TerminalWriter,
+    status_tx: &mpsc::Sender<StatusUpdate>,
+    file: &mut Option<ZmodemFile>,
+) -> Result<Option<ZmodemExit>> {
+    loop {
+        match receiver.poll() {
+            Action::WriteWire(bytes) => {
+                let bytes = bytes.to_vec();
+                writer.send(bytes.clone())?;
+                receiver.wire_written(bytes.len());
+            }
+            Action::WriteFile(bytes) => {
+                let bytes = bytes.to_vec();
+                let current = file
+                    .as_mut()
+                    .ok_or_else(|| Error::msg("ZMODEM sent file data without a file"))?;
+                current.file.write_all(&bytes)?;
+                current.written += u64::try_from(bytes.len())?;
+                receiver
+                    .file_written(bytes.len())
+                    .map_err(|e| Error::msg(e.to_string()))?;
+                if current.last_status.elapsed() >= Duration::from_millis(200) {
+                    current.last_status = Instant::now();
+                    let _ = status_tx.send(StatusUpdate::Message(zmodem_progress(current)));
+                }
+            }
+            Action::Event(Event::FileStarted(info)) => {
+                let name = info.name.to_vec();
+                let size = info.size.map(Into::into);
+                let Some((name, final_path, part_path)) = zmodem_paths(&name)? else {
+                    receiver
+                        .skip_file()
+                        .map_err(|e| Error::msg(e.to_string()))?;
+                    let _ = status_tx.send(StatusUpdate::Message(
+                        "Skipping unsafe or existing ZMODEM file".into(),
+                    ));
+                    continue;
+                };
+                let output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&part_path)?;
+                receiver
+                    .accept_file_at(0)
+                    .map_err(|e| Error::msg(e.to_string()))?;
+                let now = Instant::now();
+                *file = Some(ZmodemFile {
+                    name,
+                    final_path,
+                    part_path,
+                    file: output,
+                    size,
+                    written: 0,
+                    started: now,
+                    last_status: now,
+                });
+                let _ = status_tx.send(StatusUpdate::Message(zmodem_progress(
+                    file.as_ref().expect("ZMODEM file was just set"),
+                )));
+            }
+            Action::Event(Event::FileCompleted) => {
+                let current = file
+                    .take()
+                    .ok_or_else(|| Error::msg("ZMODEM completed an unknown file"))?;
+                current.file.sync_all()?;
+                if current.final_path.exists() {
+                    return Err(Error::msg(format!(
+                        "refusing to overwrite {}",
+                        current.final_path.display()
+                    )));
+                }
+                fs::rename(&current.part_path, &current.final_path)?;
+                let _ = status_tx.send(StatusUpdate::Message(format!("Received {}", current.name)));
+            }
+            Action::Event(Event::SessionCompleted) => {
+                let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive completed".into()));
+                return Ok(Some(ZmodemExit::Completed));
+            }
+            Action::Event(Event::Aborted) => {
+                return Ok(Some(ZmodemExit::Failed(
+                    "remote cancelled ZMODEM receive".into(),
+                )))
+            }
+            Action::Event(_) | Action::ReadFile { .. } => {}
+            Action::Idle => return Ok(None),
+            _ => return Err(Error::msg("unsupported ZMODEM receiver action")),
+        }
+    }
+}
+
+fn zmodem_paths(name: &[u8]) -> Result<Option<(String, PathBuf, PathBuf)>> {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return Ok(None);
+    };
+    let path = Path::new(name);
+    if name.is_empty()
+        || path.components().count() != 1
+        || path.file_name().is_none()
+        || name == "."
+        || name == ".."
+    {
+        return Ok(None);
+    }
+    let final_path = std::env::current_dir()?.join(name);
+    let part_path = final_path.with_file_name(format!(".{name}.part"));
+    if final_path.exists() || part_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some((name.into(), final_path, part_path)))
+}
+
+fn zmodem_progress(file: &ZmodemFile) -> String {
+    let elapsed_ms = file.started.elapsed().as_millis().max(1);
+    let rate = (u128::from(file.written) * 1000) / elapsed_ms;
+    match file.size {
+        Some(size) => format!(
+            "Receiving {}: {}/{} bytes ({rate:.0} B/s)",
+            file.name, file.written, size
+        ),
+        None => format!(
+            "Receiving {}: {} bytes ({rate:.0} B/s)",
+            file.name, file.written
+        ),
     }
 }
 
@@ -1002,10 +1007,10 @@ fn main() -> Result<()> {
                 Ok(false) => match receiver.write(&read) {
                     Ok(()) => forward_to_zmodem = true,
                     Err(e) => {
-                        // `rz` can exit just after the final ZMODEM frame.
+                        // The receiver can finish just after the final ZMODEM frame.
                         // Do not discard this packet: it may already be the
                         // BBS's first ordinary response.
-                        warn!("writing received data to rz failed: {e}");
+                        warn!("writing received data to ZMODEM failed: {e}");
                         zmodem_active.store(false, Ordering::Release);
                         zmodem_receiver = None;
                         let _ =
@@ -1013,7 +1018,7 @@ fn main() -> Result<()> {
                     }
                 },
                 Err(e) => {
-                    warn!("checking rz status failed: {e}");
+                    warn!("checking ZMODEM status failed: {e}");
                     zmodem_active.store(false, Ordering::Release);
                     zmodem_receiver = None;
                     let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
@@ -1039,36 +1044,17 @@ fn main() -> Result<()> {
             let zmodem_data = zmodem_probe.split_off(offset);
             zmodem_probe.clear();
             zmodem_active.store(true, Ordering::Release);
-            match ZmodemReceiver::start(
+            let mut receiver = ZmodemReceiver::start(
                 zmodem_writer.clone(),
                 Arc::clone(&zmodem_active),
                 status_tx.clone(),
-            ) {
-                Ok(mut receiver) => {
-                    if let Err(e) = receiver.write(&zmodem_data) {
-                        warn!("writing ZMODEM header to rz failed: {e}");
-                        zmodem_active.store(false, Ordering::Release);
-                        let _ =
-                            status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
-                    } else {
-                        zmodem_receiver = Some(receiver);
-                    }
-                }
-                Err(e) => {
-                    error!("starting rz failed: {e}");
-                    zmodem_active.store(false, Ordering::Release);
-                    let _ = status_tx.send(StatusUpdate::Message("Unable to start rz".into()));
-                    if !relay_terminal_data(
-                        &zmodem_data,
-                        &mut terminal_text,
-                        &cq_tx,
-                        &down_tx,
-                        &remote_label,
-                        &local_label,
-                    )? {
-                        break;
-                    }
-                }
+            );
+            if let Err(e) = receiver.write(&zmodem_data) {
+                warn!("starting ZMODEM data failed: {e}");
+                zmodem_active.store(false, Ordering::Release);
+                let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive failed".into()));
+            } else {
+                zmodem_receiver = Some(receiver);
             }
         } else {
             let retained = zmodem_start_prefix_len(&zmodem_probe);
@@ -1112,7 +1098,6 @@ fn ascii7_to_str(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use std::net::TcpListener;
 
     #[test]
@@ -1123,6 +1108,13 @@ mod tests {
     #[test]
     fn ignores_non_zmodem_terminal_data() {
         assert_eq!(zmodem_start_offset(b"sz some-file.txt\r"), None);
+    }
+
+    #[test]
+    fn rejects_unsafe_zmodem_filenames() {
+        assert!(zmodem_paths(b"../escape").unwrap().is_none());
+        assert!(zmodem_paths(b"subdir/file").unwrap().is_none());
+        assert!(zmodem_paths(b"\xff").unwrap().is_none());
     }
 
     #[test]
@@ -1145,33 +1137,6 @@ mod tests {
         let mut decoder = TerminalTextDecoder::default();
         assert_eq!(decoder.decode(b"last\r"), "last");
         assert_eq!(decoder.finish(), "\n");
-    }
-
-    #[test]
-    fn rz_progress_keeps_only_the_current_printable_line() {
-        let mut decoder = RzProgressDecoder::default();
-        assert_eq!(
-            decoder.decode(b"Receiving 10%\r"),
-            Some("Receiving 10%".into())
-        );
-        assert_eq!(
-            decoder.decode(b"\x1b[2KReceiving 20%\r"),
-            Some("Receiving 20%".into())
-        );
-        assert_eq!(
-            decoder.decode(b"Loading 10%\x08\x08\x0820%"),
-            Some("Loading 20%".into())
-        );
-    }
-
-    #[test]
-    fn rz_progress_forwards_the_last_partial_line_at_eof() {
-        let (status_tx, status_rx) = mpsc::channel();
-        forward_rz_progress(Cursor::new(b"Receiving 10%\rReceiving 20%"), status_tx);
-        assert_eq!(
-            status_rx.try_iter().last(),
-            Some(StatusUpdate::Message("Receiving 20%".into()))
-        );
     }
 
     #[test]
