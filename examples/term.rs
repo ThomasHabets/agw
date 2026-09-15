@@ -274,18 +274,31 @@ fn run_zmodem_receiver(
     receiver.set_manual_file_accept(true);
     let _ = status_tx.send(StatusUpdate::Message("Receiving ZMODEM files".into()));
     let mut file = None;
+    let mut session_completed = false;
     let mut last_wire = Instant::now();
     loop {
         match cancel.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
                 let _ = receiver.abort();
-                let _ = drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file);
+                let _ = drain_zmodem_actions(
+                    &mut receiver,
+                    &writer,
+                    &status_tx,
+                    &mut file,
+                    &mut session_completed,
+                );
                 let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive cancelled".into()));
                 return ZmodemExit::Cancelled;
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        match drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file) {
+        match drain_zmodem_actions(
+            &mut receiver,
+            &writer,
+            &status_tx,
+            &mut file,
+            &mut session_completed,
+        ) {
             Ok(Some(exit)) => return exit,
             Ok(None) => {}
             Err(e) => {
@@ -308,9 +321,13 @@ fn run_zmodem_receiver(
                             ))
                         }
                     }
-                    if let Ok(Some(exit)) =
-                        drain_zmodem_actions(&mut receiver, &writer, &status_tx, &mut file)
-                    {
+                    if let Ok(Some(exit)) = drain_zmodem_actions(
+                        &mut receiver,
+                        &writer,
+                        &status_tx,
+                        &mut file,
+                        &mut session_completed,
+                    ) {
                         return exit;
                     }
                 }
@@ -332,6 +349,7 @@ fn drain_zmodem_actions(
     writer: &TerminalWriter,
     status_tx: &mpsc::Sender<StatusUpdate>,
     file: &mut Option<ZmodemFile>,
+    session_completed: &mut bool,
 ) -> Result<Option<ZmodemExit>> {
     loop {
         match receiver.poll() {
@@ -404,8 +422,10 @@ fn drain_zmodem_actions(
                 let _ = status_tx.send(StatusUpdate::Message(format!("Received {}", current.name)));
             }
             Action::Event(Event::SessionCompleted) => {
-                let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive completed".into()));
-                return Ok(Some(ZmodemExit::Completed));
+                // `zmodem2` reports the event before its final ZFIN has been
+                // emitted.  Keep driving the receiver so ABBS can receive
+                // that acknowledgement and send its final OO.
+                *session_completed = true;
             }
             Action::Event(Event::Aborted) => {
                 return Ok(Some(ZmodemExit::Failed(
@@ -413,6 +433,10 @@ fn drain_zmodem_actions(
                 )))
             }
             Action::Event(_) | Action::ReadFile { .. } => {}
+            Action::Idle if *session_completed => {
+                let _ = status_tx.send(StatusUpdate::Message("ZMODEM receive completed".into()));
+                return Ok(Some(ZmodemExit::Completed));
+            }
             Action::Idle => return Ok(None),
             _ => return Err(Error::msg("unsupported ZMODEM receiver action")),
         }
