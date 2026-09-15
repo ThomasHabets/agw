@@ -926,9 +926,14 @@ impl AGW {
                 {
                     return Ok(i.data);
                 }
+                // The spec says that the pid is `0xf0 or 0x00`. At least with
+                // direwolf this does not mean that the pid will correspond with
+                // the pid of the connection, so we allow any pid value as a
+                // disconnect message.
+                //
+                // Direwolf bug?
                 Reply::Disconnect
                     if h.port == port
-                        && h.pid == pid
                         && (h.src.as_ref() == Some(remote))
                         && (h.dst.as_ref() == Some(me)) =>
                 {
@@ -1145,5 +1150,36 @@ mod tests {
             b"ok"
         );
         assert_eq!(agw.rxqueue.len(), 1);
+    }
+
+    #[test]
+    fn read_connected_accepts_a_zero_pid_disconnect() {
+        let me = call("ME");
+        let remote = call("REMOTE");
+        let (rx_tx, rx) = mpsc::channel();
+        let (tx, _tx_rx) = mpsc::channel();
+        let mut agw = AGW {
+            rx,
+            tx,
+            rxqueue: LinkedList::new(),
+        };
+
+        rx_tx
+            .send((
+                Header::new(
+                    Port(1),
+                    b'd',
+                    Pid(0),
+                    Some(remote.clone()),
+                    Some(me.clone()),
+                    0,
+                ),
+                Reply::Disconnect,
+            ))
+            .unwrap();
+
+        assert!(agw
+            .read_connected(Port(1), Pid(0xf0), &me, &remote)
+            .is_err());
     }
 }
