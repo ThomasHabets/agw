@@ -300,9 +300,16 @@ pub struct AGW {
     shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
     /// Background transport thread, retained so callers can wait for it.
     join_handle: Option<std::thread::JoinHandle<Result<()>>>,
-    /// Serializes control requests that AGW cannot correlate independently.
+    /// Serializes control requests because AGW replies carry no request ID.
+    ///
+    /// Without this lock, concurrent requests of the same kind could each
+    /// accept the other's reply from the shared transport.
     control: Mutex<()>,
-    /// Serializes connection setup for identical AGW connection confirmations.
+    /// Serializes connection setup because AGW confirmations identify only the
+    /// port and callsigns, not a particular connect request.
+    ///
+    /// The lock is released once setup finishes, so established AX.25
+    /// connections can read and write concurrently.
     connecting: Mutex<()>,
 }
 
