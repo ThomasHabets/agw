@@ -522,20 +522,21 @@ impl<T: std::os::fd::AsFd> Poll for T {
     fn poll(&self, other: libc::c_int) -> Result<PollResult> {
         use std::os::fd::AsRawFd;
 
-        let mut fds = [
-            libc::pollfd {
-                fd: self.as_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: other,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
         loop {
-            let result = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            let mut fds = [
+                libc::pollfd {
+                    fd: self.as_fd().as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: other,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+
+            let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
             if result < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
