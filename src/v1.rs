@@ -602,11 +602,7 @@ impl AGW {
             };
             let reply = parse_reply(&header, &payload)?;
             trace!("agw: Got reply: {}", reply.description());
-            let done = matches!(reply, Reply::Disconnect);
             tx.send((header, reply)).map_err(Error::other)?;
-            if done {
-                break Ok(());
-            }
         }
     }
 
@@ -993,6 +989,44 @@ mod tests {
             tx_rx.recv().unwrap(),
             Packet::RegisterCallsign(Port(1), call).serialize()
         );
+    }
+
+    #[test]
+    fn reader_continues_after_a_connection_disconnect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut writer = std::net::TcpStream::connect(addr).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || AGW::reader(stream, &tx));
+        let remote = call("REMOTE");
+        let local = call("LOCAL");
+
+        writer
+            .write_all(
+                &Packet::Disconnect {
+                    port: Port(1),
+                    pid: Pid(0),
+                    src: remote,
+                    dst: local,
+                }
+                .serialize(),
+            )
+            .unwrap();
+        writer
+            .write_all(
+                &Packet::VersionReply {
+                    major: 2000,
+                    minor: 1,
+                }
+                .serialize(),
+            )
+            .unwrap();
+        drop(writer);
+
+        assert!(matches!(rx.recv().unwrap().1, Reply::Disconnect));
+        assert!(matches!(rx.recv().unwrap().1, Reply::Version(2000, 1)));
+        assert!(reader.join().unwrap().is_err());
     }
 
     #[test]
