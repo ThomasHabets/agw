@@ -189,6 +189,12 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             Reply::CallsignRegistration(data[0] == 1)
         }
         b'C' => {
+            // AGW connection status messages may be terminated by CR, LF,
+            // and/or NUL. They are framing artifacts, not status text.
+            let data = std::str::from_utf8(data)
+                .map_err(Error::other)?
+                .trim_end_matches(['\0', '\r', '\n'])
+                .to_string();
             let connection = Connected {
                 port: header.port,
                 pid: header.pid,
@@ -200,7 +206,7 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                     .dst
                     .clone()
                     .ok_or(Error::msg("connection established missing dst"))?,
-                data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
+                data,
             };
             if connection.data.starts_with("*** CONNECTED To Station") {
                 Reply::IncomingConnection(connection)
@@ -994,6 +1000,20 @@ mod tests {
             parse_reply(&header, b"*** RETRYOUT").unwrap(),
             Reply::ConnectionFailed(_)
         ));
+    }
+
+    #[test]
+    fn trims_connection_status_terminators() {
+        let remote = call("REMOTE");
+        let local = call("LOCAL");
+        let header = Header::new(Port(1), b'C', Pid(0), Some(remote), Some(local), 33);
+
+        let Reply::ConnectionEstablished(connection) =
+            parse_reply(&header, b"*** CONNECTED With Station REMOTE\r\0").unwrap()
+        else {
+            panic!("expected a successful connection");
+        };
+        assert_eq!(connection.data, "*** CONNECTED With Station REMOTE");
     }
 
     #[test]
