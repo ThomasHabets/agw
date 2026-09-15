@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -22,7 +22,7 @@ use cursive::wrap_impl;
 use cursive::Printer;
 use log::{debug, error, warn};
 use serde::Serialize;
-use zmodem2::{Action, Event, Receiver};
+use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 
 use agw::{Call, Pid, Port};
 
@@ -142,6 +142,120 @@ struct ZmodemReceiver {
     input: mpsc::Sender<Vec<u8>>,
     completion: mpsc::Receiver<ZmodemExit>,
     cancel: mpsc::Sender<()>,
+}
+
+enum UiInput {
+    Command(String),
+    Upload(PathBuf),
+}
+
+/// An outgoing transfer. The selected local path is never sent as metadata:
+/// only its basename is advertised to the BBS.
+struct ZmodemSender {
+    input: mpsc::Sender<Vec<u8>>,
+    completion: mpsc::Receiver<()>,
+}
+
+impl ZmodemSender {
+    fn start(
+        path: PathBuf,
+        writer: TerminalWriter,
+        active: Arc<AtomicBool>,
+        status: mpsc::Sender<StatusUpdate>,
+    ) -> Result<Self> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::msg("upload path needs a UTF-8 file name"))?
+            .to_owned();
+        let size = u32::try_from(fs::metadata(&path)?.len())
+            .map_err(|_| Error::msg("upload file is too large"))?;
+        let (input, input_rx) = mpsc::channel();
+        let (completion_tx, completion) = mpsc::channel();
+        active.store(true, Ordering::Release);
+        let _ = status.send(StatusUpdate::InputEnabled(false));
+
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                use std::io::Seek;
+
+                let mut file = File::open(path)?;
+                let mut sender = Sender::new().map_err(|e| Error::msg(e.to_string()))?;
+                sender
+                    .start_file(FileInfo::new(name.as_bytes(), Some(Position::new(size))))
+                    .map_err(|e| Error::msg(e.to_string()))?;
+                let mut pending_wire = Vec::new();
+                let mut session_completed = false;
+
+                loop {
+                    match sender.poll() {
+                        Action::WriteWire(bytes) => {
+                            let bytes = bytes.to_vec();
+                            writer.send(bytes.clone())?;
+                            sender.wire_written(bytes.len());
+                        }
+                        Action::ReadFile { offset, max_len } => {
+                            file.seek(std::io::SeekFrom::Start(u64::from(offset.get())))?;
+                            let mut data = vec![0; max_len];
+                            let read = file.read(&mut data)?;
+                            if read == 0 {
+                                return Err(Error::msg("upload file ended unexpectedly"));
+                            }
+                            sender
+                                .submit_file(&data[..read])
+                                .map_err(|e| Error::msg(e.to_string()))?;
+                        }
+                        Action::Event(Event::FileCompleted) => {
+                            sender.finish().map_err(|e| Error::msg(e.to_string()))?;
+                        }
+                        Action::Event(Event::SessionCompleted) => session_completed = true,
+                        Action::Event(Event::Aborted) => {
+                            return Err(Error::msg("upload aborted"));
+                        }
+                        // Keep polling after SessionCompleted so the final
+                        // ZFIN output is emitted before input is re-enabled.
+                        Action::Idle if session_completed => return Ok(()),
+                        Action::Idle => {
+                            if !pending_wire.is_empty() {
+                                let consumed = sender
+                                    .submit_wire(&pending_wire)
+                                    .map_err(|e| Error::msg(e.to_string()))?;
+                                if consumed > 0 {
+                                    pending_wire.drain(..consumed);
+                                    continue;
+                                }
+                            }
+                            pending_wire.extend(
+                                input_rx
+                                    .recv_timeout(ZMODEM_TIMEOUT)
+                                    .map_err(|_| Error::msg("upload timed out"))?,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            })();
+
+            active.store(false, Ordering::Release);
+            let _ = status.send(StatusUpdate::InputEnabled(true));
+            let _ = status.send(StatusUpdate::Message(result.map_or_else(
+                |e| format!("ZMODEM upload failed: {e}"),
+                |()| "ZMODEM upload completed".into(),
+            )));
+            let _ = completion_tx.send(());
+        });
+        Ok(Self { input, completion })
+    }
+
+    fn write(&self, data: &[u8]) -> Result<()> {
+        self.input
+            .send(data.to_vec())
+            .map_err(|e| Error::msg(format!("sending ZMODEM data failed: {e}")))
+    }
+
+    fn finished(&self) -> bool {
+        self.completion.try_recv().is_ok()
+    }
 }
 
 enum ZmodemExit {
@@ -567,7 +681,7 @@ fn relay_terminal_text(
 
 #[allow(clippy::too_many_lines)]
 fn run_ui(
-    up_tx: mpsc::Sender<String>,
+    up_tx: mpsc::Sender<UiInput>,
     down_rx: mpsc::Receiver<String>,
     status_rx: mpsc::Receiver<StatusUpdate>,
 ) {
@@ -590,6 +704,8 @@ fn run_ui(
     let status = TextContent::new("");
     let connection_terminated = Arc::new(AtomicBool::new(false));
     let submit_terminated = Arc::clone(&connection_terminated);
+    let command_tx = up_tx.clone();
+    let upload_tx = up_tx;
 
     siv.set_window_title("AGW Terminal");
     siv.with_theme(|t| {
@@ -657,7 +773,9 @@ fn run_ui(
                                 if submit_terminated.load(Ordering::Acquire) {
                                     return;
                                 }
-                                up_tx.send(text.to_owned() + "\r").expect("Sending command");
+                                command_tx
+                                    .send(UiInput::Command(text.to_owned() + "\r"))
+                                    .expect("sending command");
                                 s.call_on_name("edit", |e: &mut EditView| {
                                     e.set_content("");
                                 })
@@ -672,6 +790,29 @@ fn run_ui(
                     .with_name("edit-container"),
                 )
                 .title("input")
+                .button("ZMODEM upload", move |s| {
+                    let upload_tx = upload_tx.clone();
+                    s.add_layer(
+                        Dialog::around(EditView::new().with_name("upload-path"))
+                            .title("ZMODEM upload path")
+                            .button("Upload", move |s| {
+                                let path = s
+                                    .call_on_name("upload-path", |view: &mut EditView| {
+                                        view.get_content().to_string()
+                                    })
+                                    .expect("upload path input was just added");
+                                if path.is_empty() {
+                                    return;
+                                }
+                                if upload_tx.send(UiInput::Upload(PathBuf::from(path))).is_ok() {
+                                    s.pop_layer();
+                                }
+                            })
+                            .button("Cancel", |s| {
+                                s.pop_layer();
+                            }),
+                    );
+                })
                 .button("Quit", move |s| {
                     s.quit();
                 }),
@@ -994,20 +1135,22 @@ fn main() -> Result<()> {
     let terminal_writer = con.writer()?;
     let zmodem_writer = terminal_writer.clone();
     let zmodem_active = Arc::new(AtomicBool::new(false));
+    let zmodem_sender = Arc::new(Mutex::new(None));
 
     let cq_tx2 = cq_tx.clone();
     let src2 = local_label.clone();
     let dst2 = remote_label.clone();
     let up_zmodem_active = Arc::clone(&zmodem_active);
+    let up_zmodem_sender = Arc::clone(&zmodem_sender);
     let up_status_tx = status_tx.clone();
     let up_writer = terminal_writer.clone();
 
     let up_thread = std::thread::spawn(move || loop {
         match up_rx.recv() {
-            Ok(data) => {
+            Ok(UiInput::Command(data)) => {
                 if up_zmodem_active.load(Ordering::Acquire) {
                     let _ = up_status_tx.send(StatusUpdate::Message(
-                        "ZMODEM receive is still active; command not sent".into(),
+                        "ZMODEM transfer is still active; command not sent".into(),
                     ));
                     continue;
                 }
@@ -1021,6 +1164,33 @@ fn main() -> Result<()> {
                     warn!("sending command failed: {e}");
                     let _ = up_status_tx.send(StatusUpdate::Terminated("Connection closed".into()));
                     return;
+                }
+            }
+            Ok(UiInput::Upload(path)) => {
+                if up_zmodem_active.load(Ordering::Acquire) {
+                    let _ = up_status_tx.send(StatusUpdate::Message(
+                        "ZMODEM transfer is still active; upload not started".into(),
+                    ));
+                    continue;
+                }
+                match ZmodemSender::start(
+                    path,
+                    up_writer.clone(),
+                    Arc::clone(&up_zmodem_active),
+                    up_status_tx.clone(),
+                ) {
+                    Ok(sender) => match up_zmodem_sender.lock() {
+                        Ok(mut current) => *current = Some(sender),
+                        Err(_) => {
+                            let _ = up_status_tx.send(StatusUpdate::Message(
+                                "ZMODEM upload could not be started".into(),
+                            ));
+                        }
+                    },
+                    Err(e) => {
+                        let _ = up_status_tx
+                            .send(StatusUpdate::Message(format!("ZMODEM upload failed: {e}")));
+                    }
                 }
             }
             Err(e) => {
@@ -1067,6 +1237,23 @@ fn main() -> Result<()> {
         };
 
         let mut forward_to_zmodem = false;
+        match zmodem_sender.lock() {
+            Ok(mut current) => {
+                if let Some(sender) = current.as_ref() {
+                    if sender.finished() {
+                        *current = None;
+                    } else {
+                        sender.write(&read)?;
+                        forward_to_zmodem = true;
+                    }
+                }
+            }
+            Err(_) => return Err(Error::msg("ZMODEM upload state was poisoned")),
+        }
+        if forward_to_zmodem {
+            continue;
+        }
+
         if let Some(receiver) = zmodem_receiver.as_mut() {
             match receiver.finished() {
                 Ok(true) => zmodem_receiver = None,
