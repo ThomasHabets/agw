@@ -107,8 +107,6 @@ pub(crate) struct Connected {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Reply {
-    Error(Error),
-
     // TODO: should these actually pick up the header value subset,
     // too, when appropriate?
     Version(u16, u16),                       // R.
@@ -133,7 +131,6 @@ pub(crate) enum Reply {
 impl Reply {
     fn description(&self) -> String {
         match self {
-            Reply::Error(e) => format!("Error: {e}"),
             Reply::Disconnect => "Disconnect".to_string(),
             Reply::ConnectedData(data) => format!("ConnectedData: {data:?}"),
             Reply::ConnectedSent(data) => format!("ConnectedSent: {data:?}"),

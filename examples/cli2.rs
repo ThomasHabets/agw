@@ -95,7 +95,11 @@ fn main2(opt: Cli, agw: &agw::v2::AGW) -> Result<()> {
             let port = agw::Port(0); // TODO
             let src = &Call::from_str(&src)?;
             agw.register_callsign(port, src)?;
-            let mut con = agw.connect(port, src.clone(), Call::from_str(&dst)?, &[])?;
+            let mut con = agw.connect(agw::v2::ConnectRequest::new(
+                port,
+                src.clone(),
+                Call::from_str(&dst)?,
+            ))?;
             con.write_all(b"echo hello world\n")?;
             let data = {
                 let n = con.read(&mut buf)?;

@@ -1,234 +1,460 @@
-use log::{debug, warn};
-use std::collections::HashMap;
+//! A synchronous, multiplexed AGW client.
+
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
-use crate::Packet;
-use crate::HEADER_LEN;
-use crate::{Call, CallsignHeard, Pid, Port, Reply};
-use crate::{Error, Result};
-use crate::{PortCaps, PortsInfo};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use log::debug;
 
-struct Reader {
-    parent: Arc<AgwCon>,
-    id: u64,
-    rx: std::sync::mpsc::Receiver<Reply>,
+use crate::{Call, CallsignHeard, Error, Header, Packet, Pid, Port, PortCaps};
+use crate::{PortsInfo, Reply, Result, HEADER_LEN};
+
+const ROUTE_CAPACITY: usize = 64;
+
+#[derive(Clone)]
+struct Envelope {
+    header: Header,
+    reply: Reply,
 }
 
-impl Reader {
-    fn read(&self) -> Reply {
-        self.rx.recv().expect("TODO")
+enum RouteMatcher {
+    Version,
+    PortInfo,
+    PortCaps(Port),
+    CallsignHeard(Port),
+    FramesOutstanding(Port),
+    CallsignRegistration {
+        port: Port,
+        call: Call,
+    },
+    Connection {
+        port: Port,
+        pid: Pid,
+        local: Call,
+        remote: Call,
+    },
+}
+
+impl RouteMatcher {
+    fn matches(&self, envelope: &Envelope) -> bool {
+        match self {
+            Self::Version => matches!(envelope.reply, Reply::Version(..)),
+            Self::PortInfo => matches!(envelope.reply, Reply::PortInfo(..)),
+            Self::PortCaps(port) => {
+                matches!(envelope.reply, Reply::PortCaps(reply_port, _) if reply_port == *port)
+            }
+            Self::CallsignHeard(port) => {
+                matches!(envelope.reply, Reply::CallsignHeard(reply_port, _) if reply_port == *port)
+            }
+            Self::FramesOutstanding(port) => matches!(
+                envelope.reply,
+                Reply::FramesOutstandingPort(reply_port, _) if reply_port == *port
+            ),
+            Self::CallsignRegistration { port, call } => {
+                envelope.header.port == *port
+                    && envelope.header.src.as_ref() == Some(call)
+                    && matches!(envelope.reply, Reply::CallsignRegistration(..))
+            }
+            Self::Connection {
+                port,
+                pid,
+                local,
+                remote,
+            } => match &envelope.reply {
+                Reply::ConnectionEstablished(connection) | Reply::ConnectionFailed(connection) => {
+                    connection.port == *port
+                        && connection.src == *remote
+                        && connection.dst == *local
+                }
+                Reply::ConnectedData(data) => {
+                    data.port == *port
+                        && data.pid == *pid
+                        && data.src == *remote
+                        && data.dst == *local
+                }
+                // AGW disconnect notifications use PID zero even when data
+                // uses another PID, so the callsigns identify the connection.
+                Reply::Disconnect => {
+                    envelope.header.port == *port
+                        && envelope.header.src.as_ref() == Some(remote)
+                        && envelope.header.dst.as_ref() == Some(local)
+                }
+                _ => false,
+            },
+        }
     }
 }
 
-impl Drop for Reader {
+struct Route {
+    matcher: RouteMatcher,
+    tx: Sender<Envelope>,
+    terminal: Arc<Mutex<Option<Error>>>,
+}
+
+struct RouteReceiver {
+    id: u64,
+    parent: Arc<AgwCon>,
+    rx: Receiver<Envelope>,
+    terminal: Arc<Mutex<Option<Error>>>,
+}
+
+impl RouteReceiver {
+    fn recv(&self) -> Result<Envelope> {
+        self.rx.recv().map_err(|_| {
+            self.terminal
+                .lock()
+                .expect("route terminal lock poisoned")
+                .clone()
+                .unwrap_or_else(|| Error::msg("AGW route closed"))
+        })
+    }
+}
+
+impl Drop for RouteReceiver {
     fn drop(&mut self) {
-        self.parent.rx_off(self.id);
+        self.parent.remove_route(self.id);
     }
 }
 
 struct AgwCon {
-    id: std::sync::atomic::AtomicU64,
-    children: Mutex<HashMap<u64, std::sync::mpsc::Sender<Reply>>>,
-    // TODO: something better, like a rope or something?
+    next_route: AtomicU64,
+    routes: Mutex<HashMap<u64, Route>>,
     txq: Mutex<Vec<u8>>,
-    txq_notify: std::sync::Condvar,
-
+    txq_notify: Condvar,
     shut_fd: std::os::fd::OwnedFd,
-    exiting: std::sync::atomic::AtomicBool,
+    exiting: AtomicBool,
 }
 
 impl AgwCon {
     fn new(shut_fd: std::os::fd::OwnedFd) -> Self {
         Self {
-            id: 0.into(),
-            children: Mutex::new(HashMap::new()),
-            txq: Mutex::new(vec![]),
-            txq_notify: std::sync::Condvar::default(),
-            exiting: false.into(),
+            next_route: AtomicU64::new(0),
+            routes: Mutex::new(HashMap::new()),
+            txq: Mutex::new(Vec::new()),
+            txq_notify: Condvar::new(),
             shut_fd,
+            exiting: AtomicBool::new(false),
         }
     }
 
-    fn run<R: Poll + Read + Send, W: Write + Send>(&self, r: R, w: W) -> Result<()> {
-        std::thread::scope(|s| {
-            let jhr = s.spawn(move || {
-                self.reader(r);
-                debug!("agw: Reader exited");
-            });
-            let jhw = s.spawn(move || {
-                self.writer(w);
-                debug!("agw: Writer exited");
-            });
-            let jhr = jhr.join();
-            let jhw = jhw.join();
-            let ret = match (jhr, jhw) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Ok(()), Err(e)) => Err(Error::msg(format!("write thread: {e:?}"))),
-                (Err(e), Ok(())) => Err(Error::msg(format!("read thread: {e:?}"))),
-                (Err(e1), Err(e2)) => Err(Error::msg(format!(
-                    "read thread: {e1:?} write thread: {e2:?}"
-                ))),
-            };
-            if let Err(ref e) = ret {
-                warn!("AGW subthread error: {e:?}");
-            }
-            ret
-        })
-    }
-    /// Write from application to AGW server.
-    fn write(&self, data: &[u8]) -> Result<()> {
-        let mut txq = self.txq.lock()?;
-        txq.extend(data);
-        self.txq_notify.notify_one();
-        Ok(())
-    }
-    #[must_use]
-    fn rx(self: &Arc<Self>) -> Reader {
-        let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.children.lock().unwrap().insert(id, tx);
-        Reader {
+    fn add_route(self: &Arc<Self>, matcher: RouteMatcher) -> RouteReceiver {
+        let id = self.next_route.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = bounded(ROUTE_CAPACITY);
+        let terminal = Arc::new(Mutex::new(None));
+        self.routes.lock().expect("route lock poisoned").insert(
+            id,
+            Route {
+                matcher,
+                tx,
+                terminal: Arc::clone(&terminal),
+            },
+        );
+        RouteReceiver {
             id,
             parent: Arc::clone(self),
             rx,
+            terminal,
         }
     }
-    fn rx_off(&self, id: u64) {
-        self.children.lock().unwrap().remove(&id);
+
+    fn remove_route(&self, id: u64) {
+        self.routes.lock().expect("route lock poisoned").remove(&id);
     }
+
+    fn dispatch(&self, envelope: &Envelope) {
+        let mut routes = self.routes.lock().expect("route lock poisoned");
+        let mut full = Vec::new();
+        for (id, route) in routes.iter() {
+            if !route.matcher.matches(envelope) {
+                continue;
+            }
+            match route.tx.try_send(envelope.clone()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    *route.terminal.lock().expect("route terminal lock poisoned") =
+                        Some(Error::msg("AGW route inbox overflow"));
+                    full.push(*id);
+                }
+                Err(TrySendError::Disconnected(_)) => full.push(*id),
+            }
+        }
+        for id in full {
+            routes.remove(&id);
+        }
+    }
+
+    fn fail_routes(&self, error: &Error) {
+        let mut routes = self.routes.lock().expect("route lock poisoned");
+        for route in routes.values() {
+            *route.terminal.lock().expect("route terminal lock poisoned") = Some(error.clone());
+        }
+        routes.clear();
+    }
+
+    fn write(&self, data: &[u8]) -> Result<()> {
+        if self.exiting.load(Ordering::Acquire) {
+            return Err(Error::msg("AGW transport stopped"));
+        }
+        let mut txq = self.txq.lock()?;
+        txq.extend_from_slice(data);
+        self.txq_notify.notify_one();
+        Ok(())
+    }
+
     fn stop(&self) {
-        self.exiting
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if !self.exiting.swap(true, Ordering::AcqRel) {
+            self.fail_routes(&Error::msg("AGW transport stopped"));
+        }
         self.txq_notify.notify_all();
     }
-    fn writer(&self, mut w: impl Write) {
-        let mut txq = self.txq.lock().unwrap();
-        loop {
-            while txq.is_empty() {
-                txq = self.txq_notify.wait(txq).unwrap();
-                if self.exiting.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-            }
-            let n = w.write(&txq).expect("write failed");
-            txq.drain(..n);
-        }
-    }
-    fn reader(&self, r: impl Read + Poll) {
-        match self.reader_inner(r) {
-            Ok(()) => {} // TODO: send EOF to all children?
-            Err(e) => {
-                warn!("Reader error: {e}");
-                let children = self.children.lock().unwrap();
-                for child in children.values() {
-                    if let Err(e) =
-                        child.send(Reply::Error(Error::msg(format!("Reader eror: {e}"))))
-                    {
-                        warn!("Failed to write error to a subscribing client: {e}");
-                    }
-                }
-            }
-        }
-    }
-    fn reader_inner(&self, mut r: impl Read + Poll) -> Result<()> {
-        use std::os::fd::AsRawFd;
 
-        let mut header = [0_u8; HEADER_LEN];
+    fn writer(&self, mut writer: impl Write) -> Result<()> {
+        let mut txq = self.txq.lock()?;
         loop {
-            // Poll for ready or done.
-            // TODO: actually poll some pipe.
-            if let PollResult::Other = r.poll(self.shut_fd.as_raw_fd())? {
+            while txq.is_empty() && !self.exiting.load(Ordering::Acquire) {
+                txq = self.txq_notify.wait(txq)?;
+            }
+            if self.exiting.load(Ordering::Acquire) {
                 return Ok(());
             }
-            // Read header.
-            match r.read_exact(&mut header) {
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                other => other,
-            }?;
-            let header = crate::parse_header(&header)?;
-            // Read data.
-            let mut data = vec![0_u8; crate::payload_len(header.data_len)?];
-            r.read_exact(&mut data)?;
-
-            // Inform all subscribing children.
-            let reply = crate::parse_reply(&header, &data)?;
-            let children = self.children.lock().unwrap();
-            for child in children.values() {
-                if let Err(e) = child.send(reply.clone()) {
-                    warn!("Failed to write to a subscribing client: {e}");
-                }
+            let written = writer.write(&txq)?;
+            if written == 0 {
+                return Err(Error::msg("AGW writer made no progress"));
             }
+            txq.drain(..written);
         }
+    }
+
+    fn reader(&self, reader: impl Read + Poll) -> Result<()> {
+        let result = self.reader_inner(reader);
+        let error = result
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| Error::msg("AGW transport stopped"));
+        self.fail_routes(&error);
+        self.exiting.store(true, Ordering::Release);
+        self.txq_notify.notify_all();
+        result
+    }
+
+    fn reader_inner(&self, mut reader: impl Read + Poll) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let mut bytes = [0_u8; HEADER_LEN];
+        loop {
+            if matches!(reader.poll(self.shut_fd.as_raw_fd())?, PollResult::Other) {
+                return Ok(());
+            }
+            match reader.read_exact(&mut bytes) {
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                result => result?,
+            }
+            let header = crate::parse_header(&bytes)?;
+            let mut data = vec![0_u8; crate::payload_len(header.data_len)?];
+            reader.read_exact(&mut data)?;
+            let reply = crate::parse_reply(&header, &data)?;
+            self.dispatch(&Envelope { header, reply });
+        }
+    }
+
+    fn run<R: Read + Poll + Send, W: Write + Send>(&self, reader: R, writer: W) -> Result<()> {
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| self.reader(reader));
+            let writer = scope.spawn(|| {
+                let result = self.writer(writer);
+                if result.is_err() {
+                    self.stop();
+                }
+                result
+            });
+            let reader = reader
+                .join()
+                .map_err(|_| Error::msg("AGW reader thread panicked"))?;
+            self.stop();
+            let writer = writer
+                .join()
+                .map_err(|_| Error::msg("AGW writer thread panicked"))?;
+            reader.and(writer)
+        })
     }
 }
 
-/// AGW connection.
+/// A multiplexed AGW TCP client.
 pub struct AGW {
     parent: Arc<AgwCon>,
     shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
     join_handle: Option<std::thread::JoinHandle<Result<()>>>,
+    control: Mutex<()>,
+    connecting: Mutex<()>,
 }
 
-pub struct Connection {
-    me: Call,
-    peer: Call,
+/// Parameters for one outgoing AX.25 connection.
+pub struct ConnectRequest {
     port: Port,
     pid: Pid,
-    parent: Arc<AgwCon>,
-    buf: Vec<u8>,
+    local: Call,
+    remote: Call,
+    via: Vec<Call>,
 }
 
-impl Write for Connection {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if data.is_empty() {
-            return Ok(0);
+impl ConnectRequest {
+    #[must_use]
+    pub fn new(port: Port, local: Call, remote: Call) -> Self {
+        Self {
+            port,
+            pid: Pid(0xf0),
+            local,
+            remote,
+            via: Vec::new(),
         }
-        let packet = Packet::Data {
-            port: self.port,
-            pid: self.pid,
-            src: self.me.clone(),
-            dst: self.peer.clone(),
-            data: data.to_vec(),
-        };
-        let bytes = packet.serialize().map_err(std::io::Error::other)?;
-        self.parent.write(&bytes).map_err(std::io::Error::other)?;
-        Ok(data.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        // We always flush, because it goes over a channel.
-        //
-        // TODO: implement end to end flushing?
+
+    #[must_use]
+    pub fn pid(mut self, pid: Pid) -> Self {
+        self.pid = pid;
+        self
+    }
+
+    #[must_use]
+    pub fn via(mut self, via: impl IntoIterator<Item = Call>) -> Self {
+        self.via = via.into_iter().collect();
+        self
+    }
+}
+
+/// One event received from an AX.25 connection.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Received {
+    Data(Vec<u8>),
+    Disconnected,
+}
+
+/// An established AX.25 connection.
+pub struct Connection {
+    local: Call,
+    remote: Call,
+    port: Port,
+    pid: Pid,
+    connect_string: String,
+    parent: Arc<AgwCon>,
+    route: RouteReceiver,
+    pending: VecDeque<Envelope>,
+    read_buf: Vec<u8>,
+    disconnected: bool,
+}
+
+impl Connection {
+    #[must_use]
+    pub fn local(&self) -> &Call {
+        &self.local
+    }
+
+    #[must_use]
+    pub fn remote(&self) -> &Call {
+        &self.remote
+    }
+
+    #[must_use]
+    pub fn port(&self) -> Port {
+        self.port
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    #[must_use]
+    pub fn connect_string(&self) -> &str {
+        &self.connect_string
+    }
+
+    /// Receive a complete AGW connected-data packet or a disconnect event.
+    pub fn recv(&mut self) -> Result<Received> {
+        if self.disconnected {
+            return Ok(Received::Disconnected);
+        }
+        loop {
+            let envelope = self
+                .pending
+                .pop_front()
+                .map_or_else(|| self.route.recv(), Ok)?;
+            match envelope.reply {
+                Reply::ConnectedData(data) => return Ok(Received::Data(data.data)),
+                Reply::Disconnect => {
+                    self.disconnected = true;
+                    return Ok(Received::Disconnected);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Send one connected-data packet.
+    pub fn send(&mut self, data: &[u8]) -> Result<()> {
+        if self.disconnected {
+            return Err(Error::msg("connection disconnected"));
+        }
+        self.parent.write(
+            &Packet::Data {
+                port: self.port,
+                pid: self.pid,
+                src: self.local.clone(),
+                dst: self.remote.clone(),
+                data: data.to_vec(),
+            }
+            .serialize()?,
+        )
+    }
+
+    /// Request that the AGW endpoint close this AX.25 connection.
+    pub fn disconnect(&mut self) -> Result<()> {
+        if !self.disconnected {
+            self.parent.write(
+                &Packet::Disconnect {
+                    port: self.port,
+                    pid: self.pid,
+                    src: self.local.clone(),
+                    dst: self.remote.clone(),
+                }
+                .serialize()?,
+            )?;
+            self.disconnected = true;
+        }
         Ok(())
     }
 }
 
 impl Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if !self.buf.is_empty() {
-            let n = buf.len().min(self.buf.len());
-            buf[..n].copy_from_slice(&self.buf[..n]);
-            self.buf.drain(..n);
-            return Ok(n);
+        if buf.is_empty() {
+            return Ok(0);
         }
-        let rx = self.parent.clone().rx();
-        loop {
-            match rx.read() {
-                Reply::Error(e) => return Err(std::io::Error::other(e)),
-                Reply::ConnectedData(d)
-                    if d.src == self.peer
-                        && d.dst == self.me
-                        && d.port == self.port
-                        && d.pid == self.pid =>
-                {
-                    self.buf.extend(&d.data);
-                    // Reuse the code from above, even though it means an extra
-                    // copy.
-                    return self.read(buf);
-                }
-                _ => {}
+        while self.read_buf.is_empty() {
+            match self.recv().map_err(std::io::Error::other)? {
+                Received::Data(data) => self.read_buf = data,
+                Received::Disconnected => return Ok(0),
             }
         }
+        let len = buf.len().min(self.read_buf.len());
+        buf[..len].copy_from_slice(&self.read_buf[..len]);
+        self.read_buf.drain(..len);
+        Ok(len)
+    }
+}
+
+impl Write for Connection {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.send(data).map_err(std::io::Error::other)?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -240,187 +466,185 @@ pub enum PollResult {
 pub trait Poll {
     fn poll(&self, other: libc::c_int) -> Result<PollResult>;
 }
-//impl Poll for std::net::TcpStream {
+
 impl<T: std::os::fd::AsFd> Poll for T {
     fn poll(&self, other: libc::c_int) -> Result<PollResult> {
         use std::os::fd::AsRawFd;
-        let fd = self.as_fd().as_raw_fd();
+
+        let mut fds = [
+            libc::pollfd {
+                fd: self.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: other,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         loop {
-            let mut fds = [
-                libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: other,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
-            if rc < 0 {
+            let result = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            if result < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
-            if rc == 0 {
-                continue;
-            }
-            if rc == 2 {
-                // Detault to saying other one is ready.
+            if fds[1].revents != 0 {
                 return Ok(PollResult::Other);
             }
-            if rc == 1 {
-                if fds[0].revents & libc::POLLIN != 0 {
-                    return Ok(PollResult::This);
-                }
-                if fds[1].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-                    return Ok(PollResult::Other);
-                }
-                panic!("Can't happen: poll() returned 1, but nothing ready");
+            if fds[0].revents != 0 {
+                return Ok(PollResult::This);
             }
-            panic!("Can't happen: poll() returned {rc}");
         }
     }
 }
 
 fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     use std::os::fd::FromRawFd;
+
     let mut fds = [0; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        unsafe {
-            Ok((
-                std::os::fd::OwnedFd::from_raw_fd(fds[0]),
-                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
-            ))
-        }
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe {
+        Ok((
+            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+        ))
     }
 }
+
 impl AGW {
-    fn write_packet(&self, packet: &Packet) -> Result<()> {
-        let bytes = packet.serialize()?;
-        self.parent.write(&bytes)
+    /// Connect to an AGW TCP endpoint.
+    pub fn connect_tcp(addr: impl ToSocketAddrs) -> Result<Self> {
+        let writer = TcpStream::connect(addr)?;
+        let reader = writer.try_clone()?;
+        Self::new(reader, writer)
     }
 
-    /// Create AGW connection to ip:port.
-    pub fn new<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
-        r: R,
-        w: W,
+    /// Create a client from separate reader and writer transports.
+    pub fn new<R: Read + Poll + Send + 'static, W: Write + Send + 'static>(
+        reader: R,
+        writer: W,
     ) -> Result<Self> {
-        let (pr, pw) = pipe()?;
-        let parent = Arc::new(AgwCon::new(pr));
-        let p2 = parent.clone();
-        let join_handle = std::thread::spawn(move || p2.run(r, w));
+        let (reader_stop, writer_stop) = pipe()?;
+        let parent = Arc::new(AgwCon::new(reader_stop));
+        let thread_parent = Arc::clone(&parent);
+        let join_handle = std::thread::spawn(move || thread_parent.run(reader, writer));
         Ok(Self {
             parent,
-            shut_fd: Mutex::new(Some(pw)),
+            shut_fd: Mutex::new(Some(writer_stop)),
             join_handle: Some(join_handle),
+            control: Mutex::new(()),
+            connecting: Mutex::new(()),
         })
     }
+
+    fn write_packet(&self, packet: &Packet) -> Result<()> {
+        self.parent.write(&packet.serialize()?)
+    }
+
+    fn control<T>(
+        &self,
+        matcher: RouteMatcher,
+        packet: &Packet,
+        response: impl FnOnce(Reply) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = self.control.lock()?;
+        let route = self.parent.add_route(matcher);
+        self.write_packet(packet)?;
+        response(route.recv()?.reply)
+    }
+
     pub fn stop(&self) {
         self.parent.stop();
-        self.shut_fd.lock().unwrap().take();
+        self.shut_fd.lock().expect("shutdown lock poisoned").take();
     }
+
     pub fn stop_wait(self) -> Result<()> {
         self.stop();
         self.wait()
     }
+
     pub fn wait(mut self) -> Result<()> {
-        let jh = self
-            .join_handle
+        self.join_handle
             .take()
-            .expect("can't happen: wait() called a second time");
-        jh.join()
-            .map_err(|e| Error::msg(format!("failed to join AGW thread: {e:?}")))?
+            .ok_or_else(|| Error::msg("wait called twice"))?
+            .join()
+            .map_err(|_| Error::msg("AGW transport thread panicked"))?
     }
 
-    /// Get AGW version.
     pub fn version(&self) -> Result<(u16, u16)> {
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::VersionQuery)?;
-        loop {
-            return match rx.read() {
-                Reply::Error(e) => Err(e),
-                Reply::Version(a, b) => Ok((a, b)),
-                other => {
-                    warn!("Got other: {other:?}");
-                    continue;
-                }
-            };
-        }
+        self.control(
+            RouteMatcher::Version,
+            &Packet::VersionQuery,
+            |reply| match reply {
+                Reply::Version(major, minor) => Ok((major, minor)),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
     }
 
-    /// Get some port info for the AGW endpoint.
     pub fn port_info(&self) -> Result<PortsInfo> {
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::PortInfoQuery)?;
-        loop {
-            return match rx.read() {
-                Reply::Error(e) => Err(e),
-                Reply::PortInfo(i) => Ok(i),
-                other => {
-                    warn!("Got other: {other:?}");
-                    continue;
-                }
-            };
-        }
+        self.control(
+            RouteMatcher::PortInfo,
+            &Packet::PortInfoQuery,
+            |reply| match reply {
+                Reply::PortInfo(info) => Ok(info),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
     }
 
-    /// Get some port cap for the port.
     pub fn port_cap(&self, port: Port) -> Result<PortCaps> {
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::PortCapQuery(port))?;
-        loop {
-            return match rx.read() {
-                Reply::Error(e) => Err(e),
-                Reply::PortCaps(_port, caps) => Ok(caps),
-                other => {
-                    warn!("Got other: {other:?}");
-                    continue;
-                }
-            };
-        }
+        self.control(
+            RouteMatcher::PortCaps(port),
+            &Packet::PortCapQuery(port),
+            |reply| match reply {
+                Reply::PortCaps(_, caps) => Ok(caps),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
     }
 
-    /// Get list of callsigns heard.
     pub fn callsign_heard(&self, port: Port) -> Result<Vec<CallsignHeard>> {
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::CallsignHeardQuery(port))?;
-        loop {
-            return match rx.read() {
-                Reply::Error(e) => Err(e),
-                Reply::CallsignHeard(_port, heard) => Ok(heard),
-                other => {
-                    warn!("Got other: {other:?}");
-                    continue;
-                }
-            };
-        }
+        self.control(
+            RouteMatcher::CallsignHeard(port),
+            &Packet::CallsignHeardQuery(port),
+            |reply| match reply {
+                Reply::CallsignHeard(_, heard) => Ok(heard),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
     }
 
-    /// Get list of callsigns heard.
     pub fn frames_outstanding(&self, port: Port) -> Result<usize> {
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::FramesOutstandingPortQuery(port))?;
-        loop {
-            return match rx.read() {
-                Reply::Error(e) => Err(e),
-                Reply::FramesOutstandingPort(_port, n) => Ok(n),
-                other => {
-                    warn!("Got other: {other:?}");
-                    continue;
-                }
-            };
-        }
+        self.control(
+            RouteMatcher::FramesOutstanding(port),
+            &Packet::FramesOutstandingPortQuery(port),
+            |reply| match reply {
+                Reply::FramesOutstandingPort(_, count) => Ok(count),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
     }
 
-    /// Send UI packet.
-    ///
-    /// # Errors
-    ///
-    /// If the underlying connection fails.
+    pub fn register_callsign(&self, port: Port, call: &Call) -> Result<()> {
+        self.control(
+            RouteMatcher::CallsignRegistration {
+                port,
+                call: call.clone(),
+            },
+            &Packet::RegisterCallsign(port, call.clone()),
+            |reply| match reply {
+                Reply::CallsignRegistration(true) => Ok(()),
+                Reply::CallsignRegistration(false) => Err(Error::msg(format!(
+                    "callsign registration failed for {call}"
+                ))),
+                _ => unreachable!("route matched another reply"),
+            },
+        )
+    }
+
     pub fn unproto(&self, port: Port, pid: Pid, src: &Call, dst: &Call, data: &[u8]) -> Result<()> {
         self.write_packet(&Packet::Unproto {
             port,
@@ -428,83 +652,68 @@ impl AGW {
             src: src.clone(),
             dst: dst.clone(),
             data: data.to_vec(),
-        })?;
-        Ok(())
+        })
     }
 
-    /// Register callsign.
-    ///
-    /// The specs say that registering the callsign is
-    /// mandatory. Direwolf doesn't seem to care, but there it is.
-    ///
-    /// Presumably needed for incoming connection, but incoming
-    /// connections are not tested yet.
-    ///
-    /// # Errors
-    ///
-    /// If underlying connection fails.
-    pub fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
-        debug!("agw: Registering callsign");
-        let rx = self.parent.clone().rx();
-        self.write_packet(&Packet::RegisterCallsign(port, src.clone()))?;
-        loop {
-            match rx.read() {
-                Reply::Error(e) => return Err(e),
-                Reply::CallsignRegistration(true) => return Ok(()),
-                Reply::CallsignRegistration(false) => {
+    /// Open an AX.25 connection while retaining a dedicated inbound route.
+    pub fn connect(&self, request: ConnectRequest) -> Result<Connection> {
+        let _lock = self.connecting.lock()?;
+        let matcher = RouteMatcher::Connection {
+            port: request.port,
+            pid: request.pid,
+            local: request.local.clone(),
+            remote: request.remote.clone(),
+        };
+        let route = self.parent.add_route(matcher);
+        let packet = if request.via.is_empty() {
+            Packet::Connect {
+                port: request.port,
+                pid: request.pid,
+                src: request.local.clone(),
+                dst: request.remote.clone(),
+            }
+        } else {
+            Packet::ConnectVia {
+                port: request.port,
+                pid: request.pid,
+                src: request.local.clone(),
+                dst: request.remote.clone(),
+                via: request.via.clone(),
+            }
+        };
+        self.write_packet(&packet)?;
+        let mut pending = VecDeque::new();
+        let connect_string = loop {
+            let envelope = route.recv()?;
+            match envelope.reply {
+                Reply::ConnectionEstablished(connection) => {
+                    debug!("AGW connection confirmation uses PID {}", connection.pid.0);
+                    break connection.data;
+                }
+                Reply::ConnectionFailed(connection) => {
                     return Err(Error::msg(format!(
-                        "callsign registration failed for {src}"
+                        "connection failed: {}",
+                        connection.data
                     )));
                 }
-                other => warn!("Got other: {other:?}"),
-            }
-        }
-    }
-
-    pub fn connect(&self, port: Port, me: Call, peer: Call, via: &[Call]) -> Result<Connection> {
-        let parent = self.parent.clone();
-        let rx = parent.rx();
-        let pid = Pid(0xF0);
-        if via.is_empty() {
-            self.write_packet(&Packet::Connect {
-                port,
-                pid,
-                src: me.clone(),
-                dst: peer.clone(),
-            })?;
-        } else {
-            self.write_packet(&Packet::ConnectVia {
-                port,
-                pid,
-                src: me.clone(),
-                dst: peer.clone(),
-                via: via.to_vec(),
-            })?;
-        }
-        let c = loop {
-            break match rx.read() {
-                Reply::Error(e) => Err(e),
-                // AGWPE uses PID 0x00 on a C confirmation, even when the
-                // connection's data PID is 0xf0.
-                Reply::ConnectionEstablished(i)
-                    if i.port == port && i.src == peer && i.dst == me =>
-                {
-                    Ok(i)
+                Reply::Disconnect => {
+                    return Err(Error::msg("connection disconnected during setup"))
                 }
-                _ => continue,
-            };
-        }?;
-        debug!(
-            "agw: Connected with port {:?} pid {:?} src {:?} dst {:?} data {:?}",
-            c.port, c.pid, c.src, c.dst, c.data
-        );
+                _ => pending.push_back(envelope),
+            }
+        };
+        debug!("AGW connected {} to {}", request.local, request.remote);
         Ok(Connection {
-            port,
-            pid,
-            me,
-            peer,
-            parent,
-            buf: vec![],
+            local: request.local,
+            remote: request.remote,
+            port: request.port,
+            pid: request.pid,
+            connect_string,
+            parent: Arc::clone(&self.parent),
+            route,
+            pending,
+            read_buf: Vec::new(),
+            disconnected: false,
         })
     }
 }
@@ -512,6 +721,68 @@ impl AGW {
 impl Drop for AGW {
     fn drop(&mut self) {
         self.stop();
-        // Don't wait for thread to exit. If you want to wait, call stop_wait().
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(value: &str) -> Call {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn connection_route_retains_data_until_read() {
+        let (reader_stop, _writer_stop) = pipe().unwrap();
+        let parent = Arc::new(AgwCon::new(reader_stop));
+        let local = call("LOCAL");
+        let remote = call("REMOTE");
+        let route = parent.add_route(RouteMatcher::Connection {
+            port: Port(1),
+            pid: Pid(0xf0),
+            local: local.clone(),
+            remote: remote.clone(),
+        });
+        parent.dispatch(&Envelope {
+            header: Header::new(
+                Port(1),
+                b'D',
+                Pid(0xf0),
+                Some(remote.clone()),
+                Some(local.clone()),
+                2,
+            ),
+            reply: Reply::ConnectedData(crate::ConnectedData {
+                port: Port(1),
+                pid: Pid(0xf0),
+                src: remote,
+                dst: local,
+                data: b"ok".to_vec(),
+            }),
+        });
+        assert!(matches!(
+            route.recv().unwrap().reply,
+            Reply::ConnectedData(_)
+        ));
+    }
+
+    #[test]
+    fn connection_route_matches_zero_pid_disconnect() {
+        let (reader_stop, _writer_stop) = pipe().unwrap();
+        let parent = Arc::new(AgwCon::new(reader_stop));
+        let local = call("LOCAL");
+        let remote = call("REMOTE");
+        let route = parent.add_route(RouteMatcher::Connection {
+            port: Port(1),
+            pid: Pid(0xf0),
+            local: local.clone(),
+            remote: remote.clone(),
+        });
+        parent.dispatch(&Envelope {
+            header: Header::new(Port(1), b'd', Pid(0), Some(remote), Some(local), 0),
+            reply: Reply::Disconnect,
+        });
+        assert!(matches!(route.recv().unwrap().reply, Reply::Disconnect));
     }
 }
