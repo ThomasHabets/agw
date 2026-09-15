@@ -14,7 +14,7 @@ mod header;
 mod packet;
 pub use call::Call;
 pub use header::{Header, HEADER_LEN};
-pub use packet::{Packet, Pid, Port};
+pub use packet::{Packet, Pid, Port, ViaHop};
 
 mod v1;
 pub use v1::*;

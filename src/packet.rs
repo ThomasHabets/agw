@@ -25,6 +25,42 @@ pub struct Port(pub u8);
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Pid(pub u8);
 
+/// A digipeater in a connect-via route.
+///
+/// A seen hop has already repeated the frame. AX.25 represents seen hops as
+/// a contiguous prefix of the route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViaHop {
+    call: Call,
+    seen: bool,
+}
+
+impl ViaHop {
+    /// Create an unseen digipeater hop.
+    #[must_use]
+    pub fn new(call: Call) -> Self {
+        Self { call, seen: false }
+    }
+
+    /// Create a digipeater hop that has already repeated the frame.
+    #[must_use]
+    pub fn seen(call: Call) -> Self {
+        Self { call, seen: true }
+    }
+
+    /// Callsign of this digipeater.
+    #[must_use]
+    pub fn callsign(&self) -> &Call {
+        &self.call
+    }
+
+    /// Whether this digipeater has already repeated the frame.
+    #[must_use]
+    pub fn is_seen(&self) -> bool {
+        self.seen
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Packet {
     /// Application: Version query.
@@ -91,6 +127,14 @@ pub enum Packet {
         dst: Call,
         via: Vec<Call>,
     },
+    /// A connect-via request with AX.25 seen state for each digipeater.
+    ConnectViaMarked {
+        port: Port,
+        pid: Pid,
+        src: Call,
+        dst: Call,
+        via: Vec<ViaHop>,
+    },
     IncomingConnect {
         port: Port,
         pid: Pid,
@@ -150,6 +194,76 @@ pub enum Packet {
     // MonitorSupervisory(Vec<u8>) // S
     // Raw() // R.
     // Unknown
+}
+
+const MAX_CONNECT_VIA_HOPS: usize = 7;
+
+fn serialize_connect_via(
+    port: Port,
+    pid: Pid,
+    src: &Call,
+    dst: &Call,
+    hops: Vec<[u8; 10]>,
+) -> Result<Vec<u8>> {
+    if hops.is_empty() {
+        return Err(Error::msg("connect via requires at least one hop"));
+    }
+    if hops.len() > MAX_CONNECT_VIA_HOPS {
+        return Err(Error::msg(format!(
+            "tried to connect through too many hops: {} > {MAX_CONNECT_VIA_HOPS}",
+            hops.len()
+        )));
+    }
+
+    let mut data = Vec::with_capacity(1 + hops.len() * 10);
+    data.push(u8::try_from(hops.len())?);
+    for hop in hops {
+        data.extend_from_slice(&hop);
+    }
+    let header = Header::new(
+        port,
+        CMD_CONNECT_VIA,
+        pid,
+        Some(src.clone()),
+        Some(dst.clone()),
+        u32::try_from(data.len()).expect("connect via payload fits in u32"),
+    )
+    .serialize();
+    Ok([header, data].concat())
+}
+
+fn marked_connect_via_hops(via: &[ViaHop]) -> Result<Vec<[u8; 10]>> {
+    let mut saw_unseen = false;
+    let mut hops = Vec::with_capacity(via.len());
+
+    for hop in via {
+        if hop.is_seen() && saw_unseen {
+            return Err(Error::msg(
+                "seen connect-via hops must form a contiguous route prefix",
+            ));
+        }
+        saw_unseen |= !hop.is_seen();
+
+        let call = hop.callsign().as_bytes();
+        let call_len = call
+            .iter()
+            .position(|&byte| byte == 0)
+            .expect("callsigns are NUL terminated");
+        if hop.is_seen() && call_len == call.len() - 1 {
+            return Err(Error::msg(format!(
+                "seen connect-via callsign '{}' has no room for marker",
+                hop.callsign()
+            )));
+        }
+
+        let mut field = [0; 10];
+        field[..call_len].copy_from_slice(&call[..call_len]);
+        if hop.is_seen() {
+            field[call_len] = b'*';
+        }
+        hops.push(field);
+    }
+    Ok(hops)
 }
 
 impl Packet {
@@ -297,33 +411,26 @@ impl Packet {
                 src,
                 dst,
                 via,
-            } => {
-                const MAX_HOPS: usize = 7;
-                if via.is_empty() {
-                    return Err(Error::msg("connect via requires at least one hop"));
-                }
-                if via.len() > MAX_HOPS {
-                    return Err(Error::msg(format!(
-                        "tried to connect through too many hops: {} > {MAX_HOPS}",
-                        via.len()
-                    )));
-                }
-                let mut hops = Vec::new();
-                hops.push(u8::try_from(via.len())?);
-                for call in via {
-                    hops.extend_from_slice(call.as_bytes());
-                }
-                let h = Header::new(
-                    *port,
-                    CMD_CONNECT_VIA,
-                    *pid,
-                    Some(src.clone()),
-                    Some(dst.clone()),
-                    u32::try_from(hops.len()).expect("TODO: error or something"),
-                )
-                .serialize();
-                [h, hops].concat()
-            }
+            } => serialize_connect_via(
+                *port,
+                *pid,
+                src,
+                dst,
+                via.iter()
+                    .map(|call| {
+                        let mut field = [0; 10];
+                        field.copy_from_slice(call.as_bytes());
+                        field
+                    })
+                    .collect(),
+            )?,
+            Packet::ConnectViaMarked {
+                port,
+                pid,
+                src,
+                dst,
+                via,
+            } => serialize_connect_via(*port, *pid, src, dst, marked_connect_via_hops(via)?)?,
             Packet::RegisterCallsign(port, src) => Header::new(
                 *port,
                 CMD_REGISTER_CALLSIGN,
@@ -564,16 +671,44 @@ impl Packet {
                     )));
                 }
                 let mut via = Vec::with_capacity(usize::from(nhops));
+                let mut marked_via = Vec::with_capacity(usize::from(nhops));
+                let mut has_seen_hop = false;
                 for chunk in data[1..].as_chunks::<10>().0 {
-                    via.push(Call::from_bytes(chunk)?);
+                    let end = chunk
+                        .iter()
+                        .position(|&byte| byte == 0)
+                        .unwrap_or(chunk.len());
+                    let (call, seen) = match chunk[..end].strip_suffix(b"*") {
+                        Some(call) => (Call::from_bytes(call)?, true),
+                        None => (Call::from_bytes(&chunk[..end])?, false),
+                    };
+                    has_seen_hop |= seen;
+                    via.push(call.clone());
+                    marked_via.push(if seen {
+                        ViaHop::seen(call)
+                    } else {
+                        ViaHop::new(call)
+                    });
                 }
-                debug!("agw: Got ConnectVia from {src:?} to {dst:?} via {via:?}");
-                Packet::ConnectVia {
-                    port: header.port,
-                    pid: header.pid,
-                    src,
-                    dst,
-                    via,
+                if has_seen_hop {
+                    marked_connect_via_hops(&marked_via)?;
+                    debug!("agw: Got marked ConnectVia from {src:?} to {dst:?} via {marked_via:?}");
+                    Packet::ConnectViaMarked {
+                        port: header.port,
+                        pid: header.pid,
+                        src,
+                        dst,
+                        via: marked_via,
+                    }
+                } else {
+                    debug!("agw: Got ConnectVia from {src:?} to {dst:?} via {via:?}");
+                    Packet::ConnectVia {
+                        port: header.port,
+                        pid: header.pid,
+                        src,
+                        dst,
+                        via,
+                    }
                 }
             }
             CMD_DISCONNECT => Packet::Disconnect {
@@ -857,6 +992,100 @@ mod tests {
             src,
             dst,
             via: vec![hop; 8],
+        };
+        assert!(packet.serialize().is_err());
+    }
+
+    #[test]
+    fn serializes_marked_connect_via_hops() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let seen: Call = "WIDE1-1".parse().unwrap();
+        let unseen: Call = "WIDE2-2".parse().unwrap();
+        let packet = Packet::ConnectViaMarked {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            via: vec![ViaHop::seen(seen), ViaHop::new(unseen)],
+        };
+
+        let bytes = packet.serialize().unwrap();
+        assert_eq!(
+            &bytes[crate::HEADER_LEN..],
+            b"\x02WIDE1-1*\0\0WIDE2-2\0\0\0"
+        );
+    }
+
+    #[test]
+    fn parses_marked_connect_via_hops() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let header = Header::new(
+            Port(1),
+            CMD_CONNECT_VIA,
+            Pid(0xf0),
+            Some(src.clone()),
+            Some(dst.clone()),
+            21,
+        );
+
+        assert_eq!(
+            Packet::parse(&header, b"\x02WIDE1-1*\0\0WIDE2-2\0\0\0").unwrap(),
+            Packet::ConnectViaMarked {
+                port: Port(1),
+                pid: Pid(0xf0),
+                src,
+                dst,
+                via: vec![
+                    ViaHop::seen("WIDE1-1".parse().unwrap()),
+                    ViaHop::new("WIDE2-2".parse().unwrap()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn serializes_an_all_seen_connect_via_route() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let packet = Packet::ConnectViaMarked {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            via: vec![
+                ViaHop::seen("WIDE1-1".parse().unwrap()),
+                ViaHop::seen("WIDE2-2".parse().unwrap()),
+            ],
+        };
+
+        let bytes = packet.serialize().unwrap();
+        assert_eq!(&bytes[crate::HEADER_LEN..], b"\x02WIDE1-1*\0\0WIDE2-2*\0\0");
+    }
+
+    #[test]
+    fn rejects_invalid_marked_connect_via_paths() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let first: Call = "WIDE1-1".parse().unwrap();
+        let second: Call = "WIDE2-2".parse().unwrap();
+        let packet = Packet::ConnectViaMarked {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src: src.clone(),
+            dst: dst.clone(),
+            via: vec![ViaHop::new(first), ViaHop::seen(second)],
+        };
+        assert!(packet.serialize().is_err());
+
+        let too_long: Call = "ABCDEFGHI".parse().unwrap();
+        let packet = Packet::ConnectViaMarked {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            via: vec![ViaHop::seen(too_long)],
         };
         assert!(packet.serialize().is_err());
     }

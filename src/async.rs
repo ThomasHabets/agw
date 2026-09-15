@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, watch};
 use crate::{parse_header, Call, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
 
+pub use crate::ViaHop;
+
 const PID_AX25: Pid = Pid(0xf0);
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
@@ -663,6 +665,68 @@ impl AGW {
         dst: &Call,
         via: &[Call],
     ) -> Result<Connection<'a>> {
+        let connect_packet = if via.is_empty() {
+            Packet::Connect {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+            }
+        } else {
+            Packet::ConnectVia {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+                via: via.to_vec(),
+            }
+        };
+        self.connect_packet(port, pid, src, dst, connect_packet)
+            .await
+    }
+
+    /// Connect through a route whose initial digipeaters have already been
+    /// seen.
+    ///
+    /// Seen hops must form a contiguous prefix of the route. For example,
+    /// `ViaHop::seen("WIDE1-1".parse()?)` may be followed by an unseen hop,
+    /// but an unseen hop may not be followed by a seen hop.
+    ///
+    /// # Errors
+    ///
+    /// If the route is invalid or the underlying connection fails.
+    pub async fn connect_via<'a>(
+        &'a self,
+        port: Port,
+        pid: Pid,
+        src: &Call,
+        dst: &Call,
+        via: &[ViaHop],
+    ) -> Result<Connection<'a>> {
+        let connect_packet = Packet::ConnectViaMarked {
+            port,
+            pid,
+            src: src.clone(),
+            dst: dst.clone(),
+            via: via.to_vec(),
+        };
+
+        // Validate before registering connection rules or queuing the packet.
+        // Pipo serializes in a background task, where an invalid route would
+        // otherwise surface only as a transport failure.
+        connect_packet.serialize()?;
+        self.connect_packet(port, pid, src, dst, connect_packet)
+            .await
+    }
+
+    async fn connect_packet<'a>(
+        &'a self,
+        port: Port,
+        pid: Pid,
+        src: &Call,
+        dst: &Call,
+        connect_packet: Packet,
+    ) -> Result<Connection<'a>> {
         let (tx, mut rx) = mpsc::channel(1);
 
         // Register rule for receiving connection established.
@@ -685,23 +749,6 @@ impl AGW {
             },
             txd,
         );
-
-        let connect_packet = if via.is_empty() {
-            Packet::Connect {
-                port,
-                pid,
-                src: src.clone(),
-                dst: dst.clone(),
-            }
-        } else {
-            Packet::ConnectVia {
-                port,
-                pid,
-                src: src.clone(),
-                dst: dst.clone(),
-                via: via.to_vec(),
-            }
-        };
 
         // Send connection establish.
         if let Err(e) = self.send(connect_packet).await {

@@ -167,6 +167,13 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                 src,
                 dst,
                 via: _,
+            }
+            | Packet::ConnectViaMarked {
+                port,
+                pid,
+                src,
+                dst,
+                via: _,
             } => {
                 send_connect_reply(&mut server, port, pid, &src, &dst).await?;
             }
