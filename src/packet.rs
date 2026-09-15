@@ -1,4 +1,4 @@
-use log::{debug, trace};
+use log::debug;
 use std::fmt::Write;
 
 use crate::v1::{Baud, PortCaps, PortInfo, PortsInfo};
@@ -347,38 +347,18 @@ impl Packet {
                 src,
                 dst,
                 data,
-            } => {
-                let mut chunks = Vec::new();
-                trace!("agw: Sending data with pid {pid:?}");
-                if data.is_empty() {
-                    return Ok(Header::new(
-                        *port,
-                        CMD_DATA,
-                        *pid,
-                        Some(src.clone()),
-                        Some(dst.clone()),
-                        0,
-                    )
-                    .serialize());
-                }
-                // TODO: magic number.
-                for chunk in data.chunks(200) {
-                    chunks.push(
-                        Header::new(
-                            *port,
-                            CMD_DATA,
-                            *pid,
-                            Some(src.clone()),
-                            Some(dst.clone()),
-                            u32::try_from(chunk.len())
-                                .expect("TODO: error this, or make it impossible"),
-                        )
-                        .serialize(),
-                    );
-                    chunks.push(chunk.to_vec());
-                }
-                chunks
-            }
+            } => [
+                Header::new(
+                    *port,
+                    CMD_DATA,
+                    *pid,
+                    Some(src.clone()),
+                    Some(dst.clone()),
+                    u32::try_from(data.len()).expect("TODO: return an error"),
+                )
+                .serialize(),
+                data.clone(),
+            ]
             .concat(),
             Packet::Unproto {
                 port,
@@ -783,6 +763,26 @@ mod tests {
         let header: [u8; crate::HEADER_LEN] = bytes.try_into().unwrap();
         let header = crate::parse_header(&header).unwrap();
         assert_eq!(Packet::parse(&header, &[]).unwrap(), packet);
+    }
+
+    #[test]
+    fn connected_data_preserves_packet_boundaries() {
+        let src: Call = "SRC".parse().unwrap();
+        let dst: Call = "DST".parse().unwrap();
+        let data = vec![b'x'; 201];
+        let bytes = Packet::Data {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            data: data.clone(),
+        }
+        .serialize()
+        .unwrap();
+
+        assert_eq!(bytes.len(), crate::HEADER_LEN + data.len());
+        assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), 201);
+        assert_eq!(&bytes[crate::HEADER_LEN..], data);
     }
 
     #[test]
