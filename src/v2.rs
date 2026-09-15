@@ -294,10 +294,15 @@ impl AgwCon {
 
 /// A multiplexed AGW TCP client.
 pub struct AGW {
+    /// Shared transport state, including packet routes and the write queue.
     parent: Arc<AgwCon>,
+    /// Write end of the shutdown pipe used to wake the reader thread.
     shut_fd: Mutex<Option<std::os::fd::OwnedFd>>,
+    /// Background transport thread, retained so callers can wait for it.
     join_handle: Option<std::thread::JoinHandle<Result<()>>>,
+    /// Serializes control requests that AGW cannot correlate independently.
     control: Mutex<()>,
+    /// Serializes connection setup for identical AGW connection confirmations.
     connecting: Mutex<()>,
 }
 
