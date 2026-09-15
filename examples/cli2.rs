@@ -131,9 +131,7 @@ fn main() -> Result<()> {
         .init()
         .unwrap();
 
-    let wstream = std::net::TcpStream::connect(&opt.agw_addr)?;
-    let rstream = wstream.try_clone()?;
-    let agw = agw::v2::AGW::new(rstream, wstream)?;
+    let agw = agw::v2::Client::connect_tcp(&opt.agw_addr)?;
     main2(opt, &agw)?;
 
     // Optionally stop and wait.

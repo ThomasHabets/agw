@@ -292,6 +292,9 @@ pub struct AGW {
     connecting: Mutex<()>,
 }
 
+/// Preferred name for the multiplexed AGW client.
+pub type Client = AGW;
+
 /// Parameters for one outgoing AX.25 connection.
 pub struct ConnectRequest {
     port: Port,
