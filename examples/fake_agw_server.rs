@@ -198,6 +198,7 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
             Packet::Unproto { .. }
             | Packet::IncomingConnect { .. }
             | Packet::ConnectionEstablished { .. }
+            | Packet::ConnectionFailed { .. }
             | Packet::FramesOutstandingPortReply(_, _)
             | Packet::VersionReply { .. }
             | Packet::RegisterCallsignReply { .. }

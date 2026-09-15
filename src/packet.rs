@@ -103,6 +103,14 @@ pub enum Packet {
         src: Call,
         dst: Call,
     },
+    /// AGWPE reported that a connection attempt failed.
+    ConnectionFailed {
+        port: Port,
+        pid: Pid,
+        src: Call,
+        dst: Call,
+        message: String,
+    },
     Disconnect {
         port: Port,
         pid: Pid,
@@ -263,6 +271,25 @@ impl Packet {
                 format!("*** CONNECTED With Station {}", src.as_str())
                     .as_bytes()
                     .to_vec(),
+            ]
+            .concat(),
+            Packet::ConnectionFailed {
+                port,
+                pid,
+                src,
+                dst,
+                message,
+            } => [
+                Header::new(
+                    *port,
+                    CMD_CONNECT,
+                    *pid,
+                    Some(src.clone()),
+                    Some(dst.clone()),
+                    u32::try_from(message.len()).expect("can't happen"),
+                )
+                .serialize(),
+                message.as_bytes().to_vec(),
             ]
             .concat(),
             Packet::ConnectVia {
@@ -523,7 +550,14 @@ impl Packet {
                             dst,
                         }
                     } else {
-                        return Err(Error::msg(format!("unknown C {s}")));
+                        debug!("agw: Got ConnectionFailed {s}");
+                        Packet::ConnectionFailed {
+                            port: header.port,
+                            pid: header.pid,
+                            src,
+                            dst,
+                            message: s,
+                        }
                     }
                 }
             }
@@ -771,6 +805,31 @@ mod tests {
                 pid: Pid(0),
                 src,
                 dst,
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_connection_failure_message() {
+        let src: Call = "REMOTE".parse().unwrap();
+        let dst: Call = "LOCAL".parse().unwrap();
+        let header = Header::new(
+            Port(1),
+            CMD_CONNECT,
+            Pid(0),
+            Some(src.clone()),
+            Some(dst.clone()),
+            12,
+        );
+
+        assert_eq!(
+            Packet::parse(&header, b"*** RETRYOUT").unwrap(),
+            Packet::ConnectionFailed {
+                port: Port(1),
+                pid: Pid(0),
+                src,
+                dst,
+                message: "*** RETRYOUT".into(),
             }
         );
     }

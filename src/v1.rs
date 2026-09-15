@@ -117,6 +117,7 @@ pub(crate) enum Reply {
     FramesOutstandingConnection(u32),        // Y.
     CallsignHeard(Port, Vec<CallsignHeard>), // H.
     ConnectionEstablished(Connected),        // C.
+    ConnectionFailed(Connected),             // C.
     ConnectedData(ConnectedData),            // D.
     Disconnect,                              // d.
     MonitorConnected(Vec<u8>),               // I.
@@ -138,6 +139,7 @@ impl Reply {
             Reply::PortInfo(s) => format!("Port info: {s:?}"),
             Reply::PortCaps(port, s) => format!("Port caps for port {port:?}: {s:?}"),
             Reply::ConnectionEstablished(s) => format!("Connected: {s:?}"),
+            Reply::ConnectionFailed(s) => format!("Connection failed: {s:?}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::CallsignHeard(port, c) => format!("Heard on {port:?}: {c:?}"),
             Reply::Raw(_data) => "Raw".to_string(),
@@ -185,19 +187,26 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
             }
             Reply::CallsignRegistration(data[0] == 1)
         }
-        b'C' => Reply::ConnectionEstablished(Connected {
-            port: header.port,
-            pid: header.pid,
-            src: header
-                .src
-                .clone()
-                .ok_or(Error::msg("connection established missing src"))?,
-            dst: header
-                .dst
-                .clone()
-                .ok_or(Error::msg("connection established missing dst"))?,
-            data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
-        }),
+        b'C' => {
+            let connection = Connected {
+                port: header.port,
+                pid: header.pid,
+                src: header
+                    .src
+                    .clone()
+                    .ok_or(Error::msg("connection established missing src"))?,
+                dst: header
+                    .dst
+                    .clone()
+                    .ok_or(Error::msg("connection established missing dst"))?,
+                data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
+            };
+            if connection.data.starts_with("*** CONNECTED") {
+                Reply::ConnectionEstablished(connection)
+            } else {
+                Reply::ConnectionFailed(connection)
+            }
+        }
         b'D' => Reply::ConnectedData(ConnectedData {
             port: header.port,
             pid: header.pid,
@@ -813,6 +822,9 @@ impl AGW {
                     );
                     break;
                 }
+                Reply::ConnectionFailed(i) => {
+                    return Err(Error::msg(format!("connection failed: {}", i.data)));
+                }
                 other => self.rx_enqueue(head, other),
             }
         }
@@ -947,6 +959,18 @@ mod tests {
     fn parse_reply_errors_on_missing_callsigns() {
         let header = Header::new(Port(1), b'D', Pid(0xf0), None, None, 0);
         assert!(parse_reply(&header, &[]).is_err());
+    }
+
+    #[test]
+    fn parses_connection_failure_as_failure() {
+        let remote = call("REMOTE");
+        let local = call("LOCAL");
+        let header = Header::new(Port(1), b'C', Pid(0), Some(remote), Some(local), 12);
+
+        assert!(matches!(
+            parse_reply(&header, b"*** RETRYOUT").unwrap(),
+            Reply::ConnectionFailed(_)
+        ));
     }
 
     #[test]
