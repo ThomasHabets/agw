@@ -3,12 +3,14 @@ use std::collections::LinkedList;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::HEADER_LEN;
 use crate::{Call, Header, Packet, Pid, Port};
 use crate::{Error, Result};
 
 const CALLSIGN_HEARD_REPLIES: usize = 20;
+const CALLSIGN_HEARD_TIMEOUT: Duration = Duration::from_secs(1);
 
 // TODO: get rid of Reply struct. It's just a subset of Packet.
 
@@ -692,12 +694,36 @@ impl AGW {
 
     /// Get callsigns heard.
     pub fn callsign_heard(&mut self, port: Port) -> Result<Vec<CallsignHeard>> {
+        self.callsign_heard_with_timeout(port, CALLSIGN_HEARD_TIMEOUT)
+    }
+
+    /// Get callsigns heard, waiting no longer than `timeout` for all replies.
+    ///
+    /// AGWPE normally returns twenty `H` frames. Some compatible endpoints,
+    /// including Dire Wolf, do not implement this query, so callers that need
+    /// a longer wait can opt in without allowing the default method to block
+    /// indefinitely.
+    ///
+    /// # Errors
+    ///
+    /// If the endpoint does not return all expected replies before `timeout`.
+    pub fn callsign_heard_with_timeout(
+        &mut self,
+        port: Port,
+        timeout: Duration,
+    ) -> Result<Vec<CallsignHeard>> {
         let mut heard = Vec::new();
         let mut replies = 0;
+        let deadline = Instant::now() + timeout;
         self.send(&Packet::CallsignHeardQuery(port).serialize())
             .map_err(Error::other)?;
         loop {
-            let (h, r) = self.rx.recv().map_err(Error::other)?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let (h, r) = self.rx.recv_timeout(remaining).map_err(|error| {
+                Error::msg(format!(
+                    "timed out waiting for H replies after receiving {replies}: {error}"
+                ))
+            })?;
             match r {
                 Reply::CallsignHeard(p, mut i) if p == port => {
                     heard.append(&mut i);
@@ -989,6 +1015,21 @@ mod tests {
             parse_callsign_heard(b"00:00:00 00:00:00\0").unwrap(),
             Vec::<CallsignHeard>::new()
         );
+    }
+
+    #[test]
+    fn callsign_heard_timeout_prevents_an_indefinite_wait() {
+        let (tx, _rx) = mpsc::channel();
+        let (_reply_tx, rx) = mpsc::channel();
+        let mut agw = AGW {
+            rx,
+            tx,
+            rxqueue: LinkedList::new(),
+        };
+
+        assert!(agw
+            .callsign_heard_with_timeout(Port(1), Duration::ZERO)
+            .is_err());
     }
 
     #[test]
