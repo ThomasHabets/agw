@@ -112,7 +112,7 @@ impl ConnectionV2 {
         let (txtx, txrx) = unbounded::<Packet>();
         let txthread = std::thread::spawn(move || {
             for packet in txrx {
-                let bytes = packet.serialize();
+                let bytes = packet.serialize()?;
                 wstream.write_all(&bytes)?;
                 debug!("agw: Send: {bytes:?}");
             }

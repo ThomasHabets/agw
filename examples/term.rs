@@ -125,7 +125,7 @@ impl TerminalWriter {
     fn disconnect(&self) -> Result<()> {
         match self {
             Self::Agw { sender, writer } => sender
-                .send(writer.disconnect())
+                .send(writer.disconnect()?)
                 .map_err(|e| Error::msg(format!("sending AGW disconnect failed: {e}")))?,
             Self::Tcp(sender) => sender
                 .send(TcpWrite::Disconnect)

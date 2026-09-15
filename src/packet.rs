@@ -156,9 +156,8 @@ impl Packet {
     /// Serialize packet for AGW connection.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::missing_panics_doc)]
-    #[must_use]
-    pub fn serialize(&self) -> Vec<u8> {
-        match self {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        Ok(match self {
             Packet::VersionQuery => {
                 Header::new(Port(0), CMD_VERSION, Pid(0), None, None, 0).serialize()
             }
@@ -299,17 +298,18 @@ impl Packet {
                 dst,
                 via,
             } => {
-                /*
                 const MAX_HOPS: usize = 7;
+                if via.is_empty() {
+                    return Err(Error::msg("connect via requires at least one hop"));
+                }
                 if via.len() > MAX_HOPS {
                     return Err(Error::msg(format!(
-                    "tried to connect through too many hops: {} > {MAX_HOPS}",
-                    via.len()
+                        "tried to connect through too many hops: {} > {MAX_HOPS}",
+                        via.len()
                     )));
                 }
-                */
                 let mut hops = Vec::new();
-                hops.push(u8::try_from(via.len()).expect("TODO: error or something"));
+                hops.push(u8::try_from(via.len())?);
                 for call in via {
                     hops.extend_from_slice(call.as_bytes());
                 }
@@ -322,7 +322,7 @@ impl Packet {
                     u32::try_from(hops.len()).expect("TODO: error or something"),
                 )
                 .serialize();
-                [h, hops.clone()].concat()
+                [h, hops].concat()
             }
             Packet::RegisterCallsign(port, src) => Header::new(
                 *port,
@@ -351,7 +351,7 @@ impl Packet {
                 let mut chunks = Vec::new();
                 trace!("agw: Sending data with pid {pid:?}");
                 if data.is_empty() {
-                    return Header::new(
+                    return Ok(Header::new(
                         *port,
                         CMD_DATA,
                         *pid,
@@ -359,7 +359,7 @@ impl Packet {
                         Some(dst.clone()),
                         0,
                     )
-                    .serialize();
+                    .serialize());
                 }
                 // TODO: magic number.
                 for chunk in data.chunks(200) {
@@ -482,7 +482,7 @@ impl Packet {
                 data.clone(),
             ]
             .concat(),
-        }
+        })
     }
     #[allow(clippy::too_many_lines)]
     pub fn parse(header: &Header, data: &[u8]) -> Result<Packet> {
@@ -775,7 +775,7 @@ mod tests {
             data: Vec::new(),
         };
 
-        let bytes = packet.serialize();
+        let bytes = packet.serialize().unwrap();
         assert_eq!(bytes.len(), crate::HEADER_LEN);
         assert_eq!(bytes[4], CMD_DATA);
         assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), 0);
@@ -831,6 +831,49 @@ mod tests {
                 dst,
                 message: "*** RETRYOUT".into(),
             }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_connect_via_paths() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let packet = Packet::ConnectVia {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src: src.clone(),
+            dst: dst.clone(),
+            via: Vec::new(),
+        };
+        assert!(packet.serialize().is_err());
+
+        let hop: Call = "WIDE1-1".parse().unwrap();
+        let packet = Packet::ConnectVia {
+            port: Port(1),
+            pid: Pid(0xf0),
+            src,
+            dst,
+            via: vec![hop; 8],
+        };
+        assert!(packet.serialize().is_err());
+    }
+
+    #[test]
+    fn connection_status_serialization_omits_callsign_padding() {
+        let src: Call = "REMOTE".parse().unwrap();
+        let dst: Call = "LOCAL".parse().unwrap();
+        let bytes = Packet::ConnectionEstablished {
+            port: Port(1),
+            pid: Pid(0),
+            src,
+            dst,
+        }
+        .serialize()
+        .unwrap();
+
+        assert_eq!(
+            &bytes[crate::HEADER_LEN..],
+            b"*** CONNECTED With Station REMOTE"
         );
     }
 

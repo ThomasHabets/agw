@@ -372,18 +372,17 @@ impl MakeWriter {
     ///
     /// If given data so bad that the serialization fails.
     pub fn data<T: Into<Vec<u8>>>(&self, data: T) -> Result<Vec<u8>> {
-        Ok(Packet::Data {
+        Packet::Data {
             port: self.port,
             pid: self.pid,
             src: self.src.clone(),
             dst: self.dst.clone(),
             data: data.into(),
         }
-        .serialize())
+        .serialize()
     }
     /// Make a disconnect packet.
-    #[must_use]
-    pub fn disconnect(&self) -> Vec<u8> {
+    pub fn disconnect(&self) -> Result<Vec<u8>> {
         Packet::Disconnect {
             port: self.port,
             pid: self.pid,
@@ -480,15 +479,13 @@ impl<'a> Connection<'a> {
     pub fn disconnect(&mut self) -> Result<()> {
         if !self.disconnected {
             debug!("agw: disconnecting");
-            self.agw.send(
-                &Packet::Disconnect {
-                    port: self.port,
-                    pid: self.pid,
-                    src: self.src.clone(),
-                    dst: self.dst.clone(),
-                }
-                .serialize(),
-            )?;
+            let packet = Packet::Disconnect {
+                port: self.port,
+                pid: self.pid,
+                src: self.src.clone(),
+                dst: self.dst.clone(),
+            };
+            self.agw.send_packet(&packet)?;
             self.disconnected = true;
         }
         Ok(())
@@ -588,6 +585,11 @@ impl AGW {
         Ok(())
     }
 
+    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
+        let bytes = packet.serialize()?;
+        self.send(&bytes)
+    }
+
     fn sender(&mut self) -> mpsc::Sender<Vec<u8>> {
         self.tx.clone()
     }
@@ -633,7 +635,7 @@ impl AGW {
     ///
     /// If the underlying connection fails.
     pub fn version(&mut self) -> Result<(u16, u16)> {
-        self.send(&Packet::VersionQuery.serialize())?;
+        self.send_packet(&Packet::VersionQuery)?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
@@ -645,7 +647,7 @@ impl AGW {
 
     /// Get the number of outstanding frames on a port.
     pub fn frames_outstanding(&mut self, port: Port) -> Result<usize> {
-        self.send(&Packet::FramesOutstandingPortQuery(port).serialize())?;
+        self.send_packet(&Packet::FramesOutstandingPortQuery(port))?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
@@ -661,7 +663,7 @@ impl AGW {
     ///
     /// If the underlying connection fails.
     pub fn port_info(&mut self) -> Result<PortsInfo> {
-        self.send(&Packet::PortInfoQuery.serialize())?;
+        self.send_packet(&Packet::PortInfoQuery)?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
@@ -681,8 +683,7 @@ impl AGW {
         if !ports.ports.iter().any(|p| p.port == port) {
             return Err(Error::msg(format!("No such port as {port:?}")));
         }
-        self.send(&Packet::PortCapQuery(port).serialize())
-            .map_err(Error::other)?;
+        self.send_packet(&Packet::PortCapQuery(port))?;
         loop {
             let (h, r) = self.rx.recv().map_err(Error::other)?;
             match r {
@@ -715,8 +716,7 @@ impl AGW {
         let mut heard = Vec::new();
         let mut replies = 0;
         let deadline = Instant::now() + timeout;
-        self.send(&Packet::CallsignHeardQuery(port).serialize())
-            .map_err(Error::other)?;
+        self.send_packet(&Packet::CallsignHeardQuery(port))?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let (h, r) = self.rx.recv_timeout(remaining).map_err(|error| {
@@ -750,16 +750,13 @@ impl AGW {
         dst: &Call,
         data: &[u8],
     ) -> Result<()> {
-        self.send(
-            &Packet::Unproto {
-                port,
-                pid,
-                src: src.clone(),
-                dst: dst.clone(),
-                data: data.to_vec(),
-            }
-            .serialize(),
-        )?;
+        self.send_packet(&Packet::Unproto {
+            port,
+            pid,
+            src: src.clone(),
+            dst: dst.clone(),
+            data: data.to_vec(),
+        })?;
         Ok(())
     }
 
@@ -776,7 +773,7 @@ impl AGW {
     /// If underlying connection fails.
     pub fn register_callsign(&mut self, port: Port, src: &Call) -> Result<()> {
         debug!("agw: Registering callsign");
-        self.send(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
+        self.send_packet(&Packet::RegisterCallsign(port, src.clone()))?;
         loop {
             let (header, reply) = self.rx.recv().map_err(Error::other)?;
             match reply {
@@ -807,26 +804,20 @@ impl AGW {
         via: &[Call],
     ) -> Result<Connection<'a>> {
         if via.is_empty() {
-            self.send(
-                &Packet::Connect {
-                    port,
-                    pid,
-                    src: src.clone(),
-                    dst: dst.clone(),
-                }
-                .serialize(),
-            )?;
+            self.send_packet(&Packet::Connect {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+            })?;
         } else {
-            self.send(
-                &Packet::ConnectVia {
-                    port,
-                    pid,
-                    src: src.clone(),
-                    dst: dst.clone(),
-                    via: via.to_vec(),
-                }
-                .serialize(),
-            )?;
+            self.send_packet(&Packet::ConnectVia {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+                via: via.to_vec(),
+            })?;
         }
         let connect_string;
         loop {
@@ -875,16 +866,13 @@ impl AGW {
         // TODO: enforce max size?
         let len = data.len();
         if len > 0 {
-            self.send(
-                &Packet::Data {
-                    port,
-                    pid,
-                    src: src.clone(),
-                    dst: dst.clone(),
-                    data: data.to_vec(),
-                }
-                .serialize(),
-            )?;
+            self.send_packet(&Packet::Data {
+                port,
+                pid,
+                src: src.clone(),
+                dst: dst.clone(),
+                data: data.to_vec(),
+            })?;
         }
         Ok(data.len())
     }
@@ -1052,7 +1040,7 @@ mod tests {
         agw.register_callsign(Port(1), &call).unwrap();
         assert_eq!(
             tx_rx.recv().unwrap(),
-            Packet::RegisterCallsign(Port(1), call).serialize()
+            Packet::RegisterCallsign(Port(1), call).serialize().unwrap()
         );
     }
 
@@ -1075,7 +1063,8 @@ mod tests {
                     src: remote,
                     dst: local,
                 }
-                .serialize(),
+                .serialize()
+                .unwrap(),
             )
             .unwrap();
         writer
@@ -1084,7 +1073,8 @@ mod tests {
                     major: 2000,
                     minor: 1,
                 }
-                .serialize(),
+                .serialize()
+                .unwrap(),
             )
             .unwrap();
         drop(writer);

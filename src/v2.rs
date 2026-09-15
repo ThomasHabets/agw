@@ -184,18 +184,15 @@ impl Write for Connection {
         if data.is_empty() {
             return Ok(0);
         }
-        self.parent
-            .write(
-                &Packet::Data {
-                    port: self.port,
-                    pid: self.pid,
-                    src: self.me.clone(),
-                    dst: self.peer.clone(),
-                    data: data.to_vec(),
-                }
-                .serialize(),
-            )
-            .map_err(std::io::Error::other)?;
+        let packet = Packet::Data {
+            port: self.port,
+            pid: self.pid,
+            src: self.me.clone(),
+            dst: self.peer.clone(),
+            data: data.to_vec(),
+        };
+        let bytes = packet.serialize().map_err(std::io::Error::other)?;
+        self.parent.write(&bytes).map_err(std::io::Error::other)?;
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -302,6 +299,11 @@ fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     }
 }
 impl AGW {
+    fn write_packet(&self, packet: &Packet) -> Result<()> {
+        let bytes = packet.serialize()?;
+        self.parent.write(&bytes)
+    }
+
     /// Create AGW connection to ip:port.
     pub fn new<R: Poll + Read + Send + 'static, W: Write + Send + 'static>(
         r: R,
@@ -337,7 +339,7 @@ impl AGW {
     /// Get AGW version.
     pub fn version(&self) -> Result<(u16, u16)> {
         let rx = self.parent.clone().rx();
-        self.parent.write(&Packet::VersionQuery.serialize())?;
+        self.write_packet(&Packet::VersionQuery)?;
         loop {
             return match rx.read() {
                 Reply::Error(e) => Err(e),
@@ -353,7 +355,7 @@ impl AGW {
     /// Get some port info for the AGW endpoint.
     pub fn port_info(&self) -> Result<PortsInfo> {
         let rx = self.parent.clone().rx();
-        self.parent.write(&Packet::PortInfoQuery.serialize())?;
+        self.write_packet(&Packet::PortInfoQuery)?;
         loop {
             return match rx.read() {
                 Reply::Error(e) => Err(e),
@@ -369,7 +371,7 @@ impl AGW {
     /// Get some port cap for the port.
     pub fn port_cap(&self, port: Port) -> Result<PortCaps> {
         let rx = self.parent.clone().rx();
-        self.parent.write(&Packet::PortCapQuery(port).serialize())?;
+        self.write_packet(&Packet::PortCapQuery(port))?;
         loop {
             return match rx.read() {
                 Reply::Error(e) => Err(e),
@@ -385,8 +387,7 @@ impl AGW {
     /// Get list of callsigns heard.
     pub fn callsign_heard(&self, port: Port) -> Result<Vec<CallsignHeard>> {
         let rx = self.parent.clone().rx();
-        self.parent
-            .write(&Packet::CallsignHeardQuery(port).serialize())?;
+        self.write_packet(&Packet::CallsignHeardQuery(port))?;
         loop {
             return match rx.read() {
                 Reply::Error(e) => Err(e),
@@ -402,8 +403,7 @@ impl AGW {
     /// Get list of callsigns heard.
     pub fn frames_outstanding(&self, port: Port) -> Result<usize> {
         let rx = self.parent.clone().rx();
-        self.parent
-            .write(&Packet::FramesOutstandingPortQuery(port).serialize())?;
+        self.write_packet(&Packet::FramesOutstandingPortQuery(port))?;
         loop {
             return match rx.read() {
                 Reply::Error(e) => Err(e),
@@ -422,16 +422,13 @@ impl AGW {
     ///
     /// If the underlying connection fails.
     pub fn unproto(&self, port: Port, pid: Pid, src: &Call, dst: &Call, data: &[u8]) -> Result<()> {
-        self.parent.write(
-            &Packet::Unproto {
-                port,
-                pid,
-                src: src.clone(),
-                dst: dst.clone(),
-                data: data.to_vec(),
-            }
-            .serialize(),
-        )?;
+        self.write_packet(&Packet::Unproto {
+            port,
+            pid,
+            src: src.clone(),
+            dst: dst.clone(),
+            data: data.to_vec(),
+        })?;
         Ok(())
     }
 
@@ -449,8 +446,7 @@ impl AGW {
     pub fn register_callsign(&self, port: Port, src: &Call) -> Result<()> {
         debug!("agw: Registering callsign");
         let rx = self.parent.clone().rx();
-        self.parent
-            .write(&Packet::RegisterCallsign(port, src.clone()).serialize())?;
+        self.write_packet(&Packet::RegisterCallsign(port, src.clone()))?;
         loop {
             match rx.read() {
                 Reply::Error(e) => return Err(e),
@@ -470,26 +466,20 @@ impl AGW {
         let rx = parent.rx();
         let pid = Pid(0xF0);
         if via.is_empty() {
-            self.parent.write(
-                &Packet::Connect {
-                    port,
-                    pid,
-                    src: me.clone(),
-                    dst: peer.clone(),
-                }
-                .serialize(),
-            )?;
+            self.write_packet(&Packet::Connect {
+                port,
+                pid,
+                src: me.clone(),
+                dst: peer.clone(),
+            })?;
         } else {
-            self.parent.write(
-                &Packet::ConnectVia {
-                    port,
-                    pid,
-                    src: me.clone(),
-                    dst: peer.clone(),
-                    via: via.to_vec(),
-                }
-                .serialize(),
-            )?;
+            self.write_packet(&Packet::ConnectVia {
+                port,
+                pid,
+                src: me.clone(),
+                dst: peer.clone(),
+                via: via.to_vec(),
+            })?;
         }
         let c = loop {
             break match rx.read() {

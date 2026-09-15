@@ -458,7 +458,8 @@ impl Pipo {
 
     async fn write_loop(mut con: OwnedWriteHalf, mut rx: mpsc::Receiver<Packet>) -> Result<()> {
         while let Some(packet) = rx.recv().await {
-            con.write_all(&packet.serialize()).await?;
+            let bytes = packet.serialize()?;
+            con.write_all(&bytes).await?;
         }
         Ok(())
     }
@@ -542,7 +543,8 @@ impl AGWServer {
     ///
     /// If the TCP stream fails.
     pub async fn send(&mut self, packet: &Packet) -> Result<()> {
-        self.con.write_all(&packet.serialize()).await?;
+        let bytes = packet.serialize()?;
+        self.con.write_all(&bytes).await?;
         Ok(())
     }
 }
