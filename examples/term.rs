@@ -28,6 +28,7 @@ use agw::{Call, Pid, Port};
 
 const DEFAULT_AGW_ADDR: &str = "127.0.0.1:8010";
 const ZMODEM_START: &[u8] = b"**\x18B00";
+const ZMODEM_TIMEOUT: Duration = Duration::from_secs(100);
 
 enum TerminalConnection<'a> {
     Agw(agw::Connection<'a>),
@@ -182,6 +183,10 @@ impl StatusView {
     fn mark_terminated(&mut self) {
         self.terminated = true;
     }
+
+    fn set_content(&mut self, content: String) {
+        self.view.set_content(content);
+    }
 }
 
 impl ViewWrapper for StatusView {
@@ -262,13 +267,14 @@ fn run_zmodem_receiver(
     cancel: mpsc::Receiver<()>,
     status_tx: mpsc::Sender<StatusUpdate>,
 ) -> ZmodemExit {
-    let mut receiver = match Receiver::new() {
+    let mut receiver = match Receiver::with_flow_control(0, true) {
         Ok(receiver) => receiver,
         Err(e) => return ZmodemExit::Failed(format!("creating ZMODEM receiver failed: {e}")),
     };
     receiver.set_manual_file_accept(true);
     let _ = status_tx.send(StatusUpdate::Message("Receiving ZMODEM files".into()));
     let mut file = None;
+    let mut last_wire = Instant::now();
     loop {
         match cancel.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -290,6 +296,7 @@ fn run_zmodem_receiver(
         }
         match input.recv_timeout(Duration::from_secs(1)) {
             Ok(data) => {
+                last_wire = Instant::now();
                 let mut offset = 0;
                 while offset < data.len() {
                     match receiver.submit_wire(&data[offset..]) {
@@ -308,11 +315,13 @@ fn run_zmodem_receiver(
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(mpsc::RecvTimeoutError::Timeout) if last_wire.elapsed() >= ZMODEM_TIMEOUT => {
                 if let Err(e) = receiver.timeout() {
                     return ZmodemExit::Failed(format!("ZMODEM timeout failed: {e}"));
                 }
+                last_wire = Instant::now();
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return ZmodemExit::Cancelled,
         }
     }
@@ -433,14 +442,14 @@ fn zmodem_paths(name: &[u8]) -> Result<Option<(String, PathBuf, PathBuf)>> {
 
 fn zmodem_progress(file: &ZmodemFile) -> String {
     let elapsed_ms = file.started.elapsed().as_millis().max(1);
-    let rate = (u128::from(file.written) * 1000) / elapsed_ms;
+    let rate = (u128::from(file.written) * 8000) / elapsed_ms;
     match file.size {
         Some(size) => format!(
-            "Receiving {}: {}/{} bytes ({rate:.0} B/s)",
+            "Receiving {}: {}/{} bytes ({rate:.0} bps)",
             file.name, file.written, size
         ),
         None => format!(
-            "Receiving {}: {} bytes ({rate:.0} B/s)",
+            "Receiving {}: {} bytes ({rate:.0} bps)",
             file.name, file.written
         ),
     }
@@ -552,7 +561,6 @@ fn run_ui(
     });
 
     let status = TextContent::new("");
-    let status2 = status.clone();
     let connection_terminated = Arc::new(AtomicBool::new(false));
     let submit_terminated = Arc::clone(&connection_terminated);
 
@@ -656,15 +664,21 @@ fn run_ui(
                 StatusUpdate::Message(text) => (text, false),
                 StatusUpdate::Terminated(text) => (text, true),
             };
-            status2.set_content(ascii7_to_str(text.as_bytes()));
-            if is_terminated && !terminated {
+            let text = ascii7_to_str(text.as_bytes());
+            let mark_terminated = is_terminated && !terminated;
+            if mark_terminated {
                 terminated = true;
                 connection_terminated.store(true, Ordering::Release);
-                if status_sink
-                    .send(Box::new(|s| {
-                        let _ = s.call_on_name("status", |view: &mut StatusView| {
+            }
+            if status_sink
+                .send(Box::new(move |s| {
+                    let _ = s.call_on_name("status", |view: &mut StatusView| {
+                        view.set_content(text);
+                        if mark_terminated {
                             view.mark_terminated();
-                        });
+                        }
+                    });
+                    if mark_terminated {
                         let _ = s.call_on_name(
                             "edit-container",
                             |view: &mut EnableableView<EditView>| {
@@ -674,11 +688,11 @@ fn run_ui(
                         let _ = s.call_on_name("edit", |view: &mut EditView| {
                             view.disable();
                         });
-                    }))
-                    .is_err()
-                {
-                    return;
-                }
+                    }
+                }))
+                .is_err()
+            {
+                return;
             }
         }
     });
