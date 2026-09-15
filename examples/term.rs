@@ -165,6 +165,7 @@ struct ZmodemFile {
 enum StatusUpdate {
     Message(String),
     Terminated(String),
+    InputEnabled(bool),
 }
 
 struct StatusView {
@@ -220,9 +221,11 @@ impl ZmodemReceiver {
         let (input, input_rx) = mpsc::channel();
         let (completion_tx, completion) = mpsc::channel();
         let (cancel, cancel_rx) = mpsc::channel();
+        let _ = status_tx.send(StatusUpdate::InputEnabled(false));
         std::thread::spawn(move || {
-            let result = run_zmodem_receiver(writer, input_rx, cancel_rx, status_tx);
+            let result = run_zmodem_receiver(writer, input_rx, cancel_rx, &status_tx);
             active.store(false, Ordering::Release);
+            let _ = status_tx.send(StatusUpdate::InputEnabled(true));
             let _ = completion_tx.send(result);
         });
         Self {
@@ -265,7 +268,7 @@ fn run_zmodem_receiver(
     writer: TerminalWriter,
     input: mpsc::Receiver<Vec<u8>>,
     cancel: mpsc::Receiver<()>,
-    status_tx: mpsc::Sender<StatusUpdate>,
+    status_tx: &mpsc::Sender<StatusUpdate>,
 ) -> ZmodemExit {
     let mut receiver = match Receiver::with_flow_control(0, true) {
         Ok(receiver) => receiver,
@@ -283,7 +286,7 @@ fn run_zmodem_receiver(
                 let _ = drain_zmodem_actions(
                     &mut receiver,
                     &writer,
-                    &status_tx,
+                    status_tx,
                     &mut file,
                     &mut session_completed,
                 );
@@ -295,7 +298,7 @@ fn run_zmodem_receiver(
         match drain_zmodem_actions(
             &mut receiver,
             &writer,
-            &status_tx,
+            status_tx,
             &mut file,
             &mut session_completed,
         ) {
@@ -324,7 +327,7 @@ fn run_zmodem_receiver(
                     if let Ok(Some(exit)) = drain_zmodem_actions(
                         &mut receiver,
                         &writer,
-                        &status_tx,
+                        status_tx,
                         &mut file,
                         &mut session_completed,
                     ) {
@@ -684,9 +687,34 @@ fn run_ui(
         }));
         let mut terminated = false;
         for update in status_rx {
+            if let StatusUpdate::InputEnabled(enabled) = update {
+                let enabled = enabled && !terminated;
+                if status_sink
+                    .send(Box::new(move |s| {
+                        let _ = s.call_on_name(
+                            "edit-container",
+                            |view: &mut EnableableView<EditView>| {
+                                view.set_enabled(enabled);
+                            },
+                        );
+                        let _ = s.call_on_name("edit", |view: &mut EditView| {
+                            if enabled {
+                                view.enable();
+                            } else {
+                                view.disable();
+                            }
+                        });
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
             let (text, is_terminated) = match update {
                 StatusUpdate::Message(text) => (text, false),
                 StatusUpdate::Terminated(text) => (text, true),
+                StatusUpdate::InputEnabled(_) => unreachable!("handled above"),
             };
             let text = ascii7_to_str(text.as_bytes());
             let mark_terminated = is_terminated && !terminated;
