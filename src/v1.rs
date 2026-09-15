@@ -118,6 +118,7 @@ pub(crate) enum Reply {
     CallsignHeard(Port, Vec<CallsignHeard>), // H.
     ConnectionEstablished(Connected),        // C.
     ConnectionFailed(Connected),             // C.
+    IncomingConnection(Connected),           // C.
     ConnectedData(ConnectedData),            // D.
     Disconnect,                              // d.
     MonitorConnected(Vec<u8>),               // I.
@@ -139,6 +140,7 @@ impl Reply {
             Reply::PortCaps(port, s) => format!("Port caps for port {port:?}: {s:?}"),
             Reply::ConnectionEstablished(s) => format!("Connected: {s:?}"),
             Reply::ConnectionFailed(s) => format!("Connection failed: {s:?}"),
+            Reply::IncomingConnection(s) => format!("Incoming connection: {s:?}"),
             Reply::Version(maj, min) => format!("Version: {maj}.{min}"),
             Reply::CallsignHeard(port, c) => format!("Heard on {port:?}: {c:?}"),
             Reply::Raw(_data) => "Raw".to_string(),
@@ -200,7 +202,9 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
                     .ok_or(Error::msg("connection established missing dst"))?,
                 data: std::str::from_utf8(data).map_err(Error::other)?.to_string(),
             };
-            if connection.data.starts_with("*** CONNECTED") {
+            if connection.data.starts_with("*** CONNECTED To Station") {
+                Reply::IncomingConnection(connection)
+            } else if connection.data.starts_with("*** CONNECTED") {
                 Reply::ConnectionEstablished(connection)
             } else {
                 // Is a `C` with a nonstandard message really the way connection
@@ -989,6 +993,18 @@ mod tests {
         assert!(matches!(
             parse_reply(&header, b"*** RETRYOUT").unwrap(),
             Reply::ConnectionFailed(_)
+        ));
+    }
+
+    #[test]
+    fn parses_incoming_connection() {
+        let local = call("LOCAL");
+        let remote = call("REMOTE");
+        let header = Header::new(Port(1), b'C', Pid(0), Some(remote), Some(local), 30);
+
+        assert!(matches!(
+            parse_reply(&header, b"*** CONNECTED To Station LOCAL").unwrap(),
+            Reply::IncomingConnection(_)
         ));
     }
 

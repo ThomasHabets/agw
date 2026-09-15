@@ -30,6 +30,10 @@ enum RouteMatcher {
         port: Port,
         call: Call,
     },
+    IncomingConnection {
+        port: Port,
+        local: Call,
+    },
     Connection {
         port: Port,
         pid: Pid,
@@ -58,6 +62,11 @@ impl RouteMatcher {
                     && envelope.header.src.as_ref() == Some(call)
                     && matches!(envelope.reply, Reply::CallsignRegistration(..))
             }
+            Self::IncomingConnection { port, local } => matches!(
+                &envelope.reply,
+                Reply::IncomingConnection(connection)
+                    if connection.port == *port && connection.dst == *local
+            ),
             Self::Connection {
                 port,
                 pid,
@@ -348,6 +357,45 @@ pub struct Connection {
     pending: VecDeque<Envelope>,
     read_buf: Vec<u8>,
     disconnected: bool,
+}
+
+/// A registration that accepts incoming AX.25 connections for one callsign.
+pub struct Listener {
+    port: Port,
+    local: Call,
+    parent: Arc<AgwCon>,
+    route: RouteReceiver,
+}
+
+impl Listener {
+    /// Wait for and accept the next incoming AX.25 connection.
+    pub fn accept(&mut self) -> Result<Connection> {
+        loop {
+            let envelope = self.route.recv()?;
+            let Reply::IncomingConnection(connection) = envelope.reply else {
+                continue;
+            };
+            let remote = connection.src;
+            let route = self.parent.add_route(RouteMatcher::Connection {
+                port: self.port,
+                pid: Pid(0xf0),
+                local: self.local.clone(),
+                remote: remote.clone(),
+            });
+            return Ok(Connection {
+                local: self.local.clone(),
+                remote,
+                port: self.port,
+                pid: Pid(0xf0),
+                connect_string: connection.data,
+                parent: Arc::clone(&self.parent),
+                route,
+                pending: VecDeque::new(),
+                read_buf: Vec::new(),
+                disconnected: false,
+            });
+        }
+    }
 }
 
 impl Connection {
@@ -646,6 +694,21 @@ impl AGW {
                 _ => unreachable!("route matched another reply"),
             },
         )
+    }
+
+    /// Register a callsign and accept incoming AX.25 connections to it.
+    pub fn listen(&self, port: Port, local: &Call) -> Result<Listener> {
+        let route = self.parent.add_route(RouteMatcher::IncomingConnection {
+            port,
+            local: local.clone(),
+        });
+        self.register_callsign(port, local)?;
+        Ok(Listener {
+            port,
+            local: local.clone(),
+            parent: Arc::clone(&self.parent),
+            route,
+        })
     }
 
     pub fn unproto(&self, port: Port, pid: Pid, src: &Call, dst: &Call, data: &[u8]) -> Result<()> {
