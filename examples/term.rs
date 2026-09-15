@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{Shutdown, TcpStream},
@@ -29,6 +30,9 @@ use agw::{Call, Pid, Port};
 const DEFAULT_AGW_ADDR: &str = "127.0.0.1:8010";
 const ZMODEM_START: &[u8] = b"**\x18B00";
 const ZMODEM_TIMEOUT: Duration = Duration::from_secs(100);
+const ZMODEM_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(5);
+const ZMODEM_UPLOAD_STATUS_INTERVAL: Duration = Duration::from_millis(200);
+const ZMODEM_UPLOAD_STATUS_REFRESH: Duration = Duration::from_secs(1);
 
 enum TerminalConnection<'a> {
     Agw(agw::Connection<'a>),
@@ -156,7 +160,83 @@ struct ZmodemSender {
     completion: mpsc::Receiver<()>,
 }
 
+/// Locally submitted payload progress. ZMODEM retransmissions can request an
+/// earlier offset, so the display deliberately uses its high-water mark.
+struct ZmodemUploadProgress {
+    name: String,
+    size: u32,
+    sent: u64,
+    started: Instant,
+    samples: VecDeque<(Instant, u64)>,
+    last_status: Instant,
+}
+
+impl ZmodemUploadProgress {
+    fn new(name: String, size: u32, now: Instant) -> Self {
+        Self {
+            name,
+            size,
+            sent: 0,
+            started: now,
+            samples: VecDeque::from([(now, 0)]),
+            last_status: now,
+        }
+    }
+
+    fn record_submitted(&mut self, offset: Position, length: u64, now: Instant) -> bool {
+        let end = u64::from(offset.get())
+            .saturating_add(length)
+            .min(u64::from(self.size));
+        if end <= self.sent {
+            return false;
+        }
+        self.sent = end;
+        self.record_sample(now);
+        true
+    }
+
+    fn should_report(&self, now: Instant) -> bool {
+        now.duration_since(self.last_status) >= ZMODEM_UPLOAD_STATUS_INTERVAL
+    }
+
+    fn report(&mut self, status: &mpsc::Sender<StatusUpdate>, now: Instant) {
+        let _ = status.send(StatusUpdate::Message(self.status(now)));
+        self.last_status = now;
+    }
+
+    fn status(&mut self, now: Instant) -> String {
+        self.record_sample(now);
+        let (oldest_time, oldest_sent) = self.samples.front().expect("initial sample is kept");
+        let (newest_time, newest_sent) = self.samples.back().expect("current sample is kept");
+        let current_bps = bps(
+            newest_sent.saturating_sub(*oldest_sent),
+            newest_time.duration_since(*oldest_time),
+        );
+        let average_bps = bps(self.sent, now.duration_since(self.started));
+        format!(
+            "Uploading {}: {}/{} bytes sent locally \
+             ({current_bps} bps current, {average_bps} bps avg)",
+            self.name, self.sent, self.size
+        )
+    }
+
+    fn record_sample(&mut self, now: Instant) {
+        self.samples.push_back((now, self.sent));
+        let Some(cutoff) = now.checked_sub(ZMODEM_UPLOAD_RATE_WINDOW) else {
+            return;
+        };
+        while self.samples.len() > 1 && self.samples[1].0 <= cutoff {
+            self.samples.pop_front();
+        }
+    }
+}
+
+fn bps(bytes: u64, elapsed: Duration) -> u128 {
+    (u128::from(bytes) * 8_000) / elapsed.as_millis().max(1)
+}
+
 impl ZmodemSender {
+    #[allow(clippy::too_many_lines)]
     fn start(
         path: PathBuf,
         writer: TerminalWriter,
@@ -186,6 +266,10 @@ impl ZmodemSender {
                     .map_err(|e| Error::msg(e.to_string()))?;
                 let mut pending_wire = Vec::new();
                 let mut session_completed = false;
+                let started = Instant::now();
+                let mut progress = ZmodemUploadProgress::new(name, size, started);
+                progress.report(&status, started);
+                let mut last_wire = started;
 
                 loop {
                     match sender.poll() {
@@ -204,9 +288,19 @@ impl ZmodemSender {
                             sender
                                 .submit_file(&data[..read])
                                 .map_err(|e| Error::msg(e.to_string()))?;
+                            let now = Instant::now();
+                            if progress.record_submitted(
+                                offset,
+                                u64::try_from(read).map_err(Error::from)?,
+                                now,
+                            ) && progress.should_report(now)
+                            {
+                                progress.report(&status, now);
+                            }
                         }
                         Action::Event(Event::FileCompleted) => {
                             sender.finish().map_err(|e| Error::msg(e.to_string()))?;
+                            progress.report(&status, Instant::now());
                         }
                         Action::Event(Event::SessionCompleted) => session_completed = true,
                         Action::Event(Event::Aborted) => {
@@ -225,11 +319,23 @@ impl ZmodemSender {
                                     continue;
                                 }
                             }
-                            pending_wire.extend(
-                                input_rx
-                                    .recv_timeout(ZMODEM_TIMEOUT)
-                                    .map_err(|_| Error::msg("upload timed out"))?,
-                            );
+                            match input_rx.recv_timeout(ZMODEM_UPLOAD_STATUS_REFRESH) {
+                                Ok(data) => {
+                                    last_wire = Instant::now();
+                                    pending_wire.extend(data);
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout)
+                                    if last_wire.elapsed() >= ZMODEM_TIMEOUT =>
+                                {
+                                    return Err(Error::msg("upload timed out"));
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    progress.report(&status, Instant::now());
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    return Err(Error::msg("upload input closed"));
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1361,6 +1467,22 @@ mod tests {
     #[test]
     fn ignores_non_zmodem_terminal_data() {
         assert_eq!(zmodem_start_offset(b"sz some-file.txt\r"), None);
+    }
+
+    #[test]
+    fn upload_progress_uses_high_water_and_reports_bps() {
+        let start = Instant::now();
+        let mut progress = ZmodemUploadProgress::new("file.txt".into(), 1_000, start);
+        assert!(progress.status(start).contains("0/1000 bytes sent locally"));
+
+        assert!(progress.record_submitted(Position::new(0), 500, start + Duration::from_secs(1),));
+        assert!(!progress.record_submitted(Position::new(0), 500, start + Duration::from_secs(2),));
+        assert!(progress
+            .status(start + Duration::from_secs(2))
+            .contains("2000 bps current, 2000 bps avg"));
+        assert!(progress
+            .status(start + Duration::from_secs(7))
+            .contains("0 bps current, 571 bps avg"));
     }
 
     #[test]
