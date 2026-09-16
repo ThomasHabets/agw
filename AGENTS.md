@@ -1,6 +1,9 @@
 ## General
 
 * One logical change per commit
+* The protocol spec is at <https://www.on7lds.net/42/sites/default/files/AGWPEAPI.HTM>
+* The protocol spec may contain errors. Document these in spec-errors.md as
+  you find them.
 
 ## Commit messages
 
