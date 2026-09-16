@@ -12,15 +12,17 @@ use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpStream,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 
-use crate::{parse_header, Call, Packet, Pid, Port, HEADER_LEN};
+use crate::{parse_header, Call, CallsignHeard, Packet, Pid, Port, HEADER_LEN};
 use crate::{Error, Result};
 
 pub use crate::ViaHop;
 
 const PID_AX25: Pid = Pid(0xf0);
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
+const CALLSIGN_HEARD_REPLIES: usize = 20;
+const CALLSIGN_HEARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 type RuleIdent = u64;
 
@@ -55,6 +57,7 @@ pub enum RuleMatch {
     ConnectionOutcome { port: Port, src: Call, dst: Call },
     IncomingConnect { port: Port, dst: Call },
     RegisterCallsign { call: Call },
+    CallsignHeard { port: Port },
 }
 
 /// 3-tuple for a connection.
@@ -167,6 +170,15 @@ impl RuleMatch {
             RuleMatch::RegisterCallsign { call } => {
                 if let Packet::RegisterCallsignReply { call: call2, .. } = packet {
                     return call == call2;
+                }
+            }
+            RuleMatch::CallsignHeard { port } => {
+                if let Packet::CallsignHeardReply {
+                    port: response_port,
+                    data: _,
+                } = packet
+                {
+                    return port == response_port;
                 }
             }
         }
@@ -554,6 +566,7 @@ impl AGWServer {
 pub struct AGW {
     con: Pipo,
     router: Arc<Router>,
+    heard_query: AsyncMutex<()>,
 }
 
 impl AGW {
@@ -568,6 +581,7 @@ impl AGW {
         Ok(Self {
             con: Pipo::new(TcpStream::connect(addr).await?, r2)?,
             router,
+            heard_query: AsyncMutex::new(()),
         })
     }
     /// Send some data on connection.
@@ -577,6 +591,48 @@ impl AGW {
     /// Errors if the underlying connection fails.
     pub async fn send(&self, data: Packet) -> Result<()> {
         self.con.send(data).await
+    }
+
+    /// Query callsigns recently heard on one AGW port.
+    ///
+    /// AGWPE replies with exactly twenty `H` frames. This method waits up to
+    /// one second for all replies and serializes queries because their replies
+    /// cannot identify the requesting client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the AGW endpoint fails to send all responses.
+    pub async fn callsign_heard(&self, port: Port) -> Result<Vec<CallsignHeard>> {
+        let _query_lock = self.heard_query.lock().await;
+        let (tx, mut rx) = mpsc::channel(CALLSIGN_HEARD_REPLIES);
+        let _rule_handle = self.router.add(RuleMatch::CallsignHeard { port }, tx);
+        self.send(Packet::CallsignHeardQuery(port)).await?;
+
+        let deadline = tokio::time::Instant::now() + CALLSIGN_HEARD_TIMEOUT;
+        let mut heard = Vec::new();
+        for replies in 0..CALLSIGN_HEARD_REPLIES {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let packet = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .map_err(|_| {
+                    Error::msg(format!(
+                        "timed out waiting for H replies after receiving {replies}"
+                    ))
+                })?
+                .ok_or(Error::msg("AGW closed while waiting for H replies"))?;
+            let Packet::CallsignHeardReply {
+                port: response_port,
+                data,
+            } = packet
+            else {
+                return Err(Error::msg("unexpected packet while waiting for H replies"));
+            };
+            if response_port != port {
+                return Err(Error::msg("H reply had an unexpected port"));
+            }
+            heard.append(&mut crate::v1::parse_callsign_heard(&data)?);
+        }
+        Ok(heard)
     }
 
     /// Register callsign.
@@ -1123,6 +1179,7 @@ impl AsyncWrite for Connection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
     #[test]
     fn connection_outcome_rule_matches_failure() {
@@ -1141,5 +1198,41 @@ mod tests {
             dst: local,
             message: "*** RETRYOUT".into(),
         }));
+    }
+
+    #[tokio::test]
+    async fn callsign_heard_collects_twenty_replies() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut server = AGWServer::new(stream);
+            assert_eq!(
+                server.recv().await.unwrap(),
+                Packet::CallsignHeardQuery(Port(1))
+            );
+            for data in [
+                b"M0HEARD Mon,21Feb2000 11:14:30\0".to_vec(),
+                b"M0OTHER-3 Mon,21Feb2000 11:14:30\0".to_vec(),
+            ]
+            .into_iter()
+            .chain(std::iter::repeat_n(vec![0; 33], 18))
+            {
+                server
+                    .send(&Packet::CallsignHeardReply {
+                        port: Port(1),
+                        data,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let agw = AGW::new(&addr).await.unwrap();
+        let heard = agw.callsign_heard(Port(1)).await.unwrap();
+        assert_eq!(heard.len(), 2);
+        assert_eq!(heard[0].call.to_string(), "M0HEARD");
+        assert_eq!(heard[1].call.to_string(), "M0OTHER-3");
+        server.await.unwrap();
     }
 }

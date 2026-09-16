@@ -349,7 +349,7 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
     })
 }
 
-fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
+pub(crate) fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
     let text_len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     let text = std::str::from_utf8(&data[..text_len]).map_err(Error::other)?;
     let Some(call) = text.split_ascii_whitespace().next() else {
