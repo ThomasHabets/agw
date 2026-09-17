@@ -89,14 +89,7 @@ impl std::str::FromStr for Call {
 
 impl std::fmt::Display for Call {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (n, ch) in self.bytes.iter().enumerate() {
-            if *ch == 0 {
-                let s = String::from_utf8(self.bytes[..n].to_vec()).expect("parsing string");
-                return write!(f, "{s}");
-            }
-        }
-        let s = String::from_utf8(self.bytes.to_vec()).expect("parsing string");
-        write!(f, "{s}")
+        self.as_str().fmt(f)
     }
 }
 
@@ -116,5 +109,14 @@ mod tests {
         assert_eq!(call.as_str(), "N0CALL");
         assert_eq!(call.to_string(), "N0CALL");
         assert_eq!(&call.as_bytes()[..7], b"N0CALL\0");
+    }
+
+    #[test]
+    fn display_respects_requested_width() {
+        let call: Call = "N0CALL".parse().unwrap();
+
+        assert_eq!(format!("{call:10}"), "N0CALL    ");
+        assert_eq!(format!("{call:>10}"), "    N0CALL");
+        assert_eq!(format!("{call:*^10}"), "**N0CALL**");
     }
 }
