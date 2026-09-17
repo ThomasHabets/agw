@@ -162,6 +162,64 @@ fn delete_input_character<V: View>(input: &mut V) -> EventResult {
     input.on_event(CursiveEvent::Key(Key::Del))
 }
 
+fn previous_word_start(content: &str, mut cursor: usize) -> usize {
+    while cursor > 0 {
+        let (start, character) = content[..cursor].char_indices().next_back().unwrap();
+        if !character.is_whitespace() {
+            break;
+        }
+        cursor = start;
+    }
+    while cursor > 0 {
+        let (start, character) = content[..cursor].char_indices().next_back().unwrap();
+        if character.is_whitespace() {
+            break;
+        }
+        cursor = start;
+    }
+    cursor
+}
+
+fn next_word_end(content: &str, mut cursor: usize) -> usize {
+    while cursor < content.len() {
+        let character = content[cursor..].chars().next().unwrap();
+        if !character.is_whitespace() {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    while cursor < content.len() {
+        let character = content[cursor..].chars().next().unwrap();
+        if character.is_whitespace() {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn move_input_to_previous_word(input: &mut EditView) -> EventResult {
+    input.set_cursor(previous_word_start(
+        &input.get_content(),
+        input.get_cursor(),
+    ));
+    EventResult::Consumed(None)
+}
+
+fn move_input_to_next_word(input: &mut EditView) -> EventResult {
+    input.set_cursor(next_word_end(&input.get_content(), input.get_cursor()));
+    EventResult::Consumed(None)
+}
+
+fn delete_input_word(input: &mut EditView) -> EventResult {
+    let cursor = input.get_cursor();
+    let end = next_word_end(&input.get_content(), cursor);
+    if cursor == end {
+        return EventResult::Ignored;
+    }
+    EventResult::Consumed(Some(input.remove(end - cursor)))
+}
+
 /// An outgoing transfer. The selected local path is never sent as metadata:
 /// only its basename is advertised to the BBS.
 struct ZmodemSender {
@@ -905,6 +963,15 @@ fn run_ui(
                         )
                         .on_pre_event_inner(CursiveEvent::CtrlChar('d'), |input, _| {
                             Some(delete_input_character(input))
+                        })
+                        .on_pre_event_inner(CursiveEvent::AltChar('b'), |input, _| {
+                            Some(move_input_to_previous_word(&mut input.get_mut()))
+                        })
+                        .on_pre_event_inner(CursiveEvent::AltChar('f'), |input, _| {
+                            Some(move_input_to_next_word(&mut input.get_mut()))
+                        })
+                        .on_pre_event_inner(CursiveEvent::AltChar('d'), |input, _| {
+                            Some(delete_input_word(&mut input.get_mut()))
                         }),
                     )
                     .with_name("edit-container"),
@@ -1476,6 +1543,30 @@ mod tests {
 
         assert_eq!(input.get_content().as_ref(), "ac");
         assert_eq!(input.get_cursor(), 1);
+    }
+
+    #[test]
+    fn bash_word_shortcuts_move_and_delete_words() {
+        let mut input = EditView::new().content("one  two three");
+        input.set_cursor(8);
+
+        move_input_to_previous_word(&mut input);
+        assert_eq!(input.get_cursor(), 5);
+        move_input_to_previous_word(&mut input);
+        assert_eq!(input.get_cursor(), 0);
+        move_input_to_next_word(&mut input);
+        assert_eq!(input.get_cursor(), 3);
+        move_input_to_next_word(&mut input);
+        assert_eq!(input.get_cursor(), 8);
+
+        delete_input_word(&mut input);
+        assert_eq!(input.get_content().as_ref(), "one  two");
+        assert_eq!(input.get_cursor(), 8);
+
+        input.set_cursor(3);
+        delete_input_word(&mut input);
+        assert_eq!(input.get_content().as_ref(), "one");
+        assert_eq!(input.get_cursor(), 3);
     }
 
     #[test]
