@@ -99,9 +99,9 @@ pub enum Packet {
 
     /// AGWPE: Callsigns heard reply.
     ///
-    /// The full AGW payload includes timestamps the crate does not currently
-    /// model, so this keeps the raw payload bytes. Every reply contains a
-    /// NUL-terminated text area followed by two 16-byte SYSTEMTIME values.
+    /// The full AGW payload contains a NUL-terminated text area followed by
+    /// two 16-byte SYSTEMTIME values. Higher-level APIs parse those values
+    /// into [`crate::CallsignHeardTimestamp`].
     CallsignHeardReply {
         port: Port,
         data: Vec<u8>,

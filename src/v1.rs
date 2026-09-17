@@ -83,8 +83,95 @@ pub struct PortCaps {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallsignHeard {
-    pub call: Call,
-    // TODO: timestamps.
+    call: Call,
+    first_heard: CallsignHeardTimestamp,
+    last_heard: CallsignHeardTimestamp,
+}
+
+impl CallsignHeard {
+    /// Callsign heard on the queried port.
+    #[must_use]
+    pub fn call(&self) -> &Call {
+        &self.call
+    }
+
+    /// Time this callsign was first heard since AGWPE started.
+    #[must_use]
+    pub fn first_heard(&self) -> &CallsignHeardTimestamp {
+        &self.first_heard
+    }
+
+    /// Time this callsign was most recently heard since AGWPE started.
+    #[must_use]
+    pub fn last_heard(&self) -> &CallsignHeardTimestamp {
+        &self.last_heard
+    }
+}
+
+/// Calendar timestamp reported by AGWPE for a heard callsign.
+///
+/// The fields are the Windows `SYSTEMTIME` values sent by AGWPE. They have no
+/// timezone information, so they are deliberately not converted to an instant.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CallsignHeardTimestamp {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    millisecond: u16,
+}
+
+impl CallsignHeardTimestamp {
+    /// Calendar year.
+    #[must_use]
+    pub fn year(&self) -> u16 {
+        self.year
+    }
+
+    /// Calendar month reported by AGWPE.
+    #[must_use]
+    pub fn month(&self) -> u16 {
+        self.month
+    }
+
+    /// Day of week, where 0 is Sunday.
+    #[must_use]
+    pub fn day_of_week(&self) -> u16 {
+        self.day_of_week
+    }
+
+    /// Calendar day of month.
+    #[must_use]
+    pub fn day(&self) -> u16 {
+        self.day
+    }
+
+    /// Hour reported by AGWPE.
+    #[must_use]
+    pub fn hour(&self) -> u16 {
+        self.hour
+    }
+
+    /// Minute reported by AGWPE.
+    #[must_use]
+    pub fn minute(&self) -> u16 {
+        self.minute
+    }
+
+    /// Second reported by AGWPE.
+    #[must_use]
+    pub fn second(&self) -> u16 {
+        self.second
+    }
+
+    /// Millisecond reported by AGWPE.
+    #[must_use]
+    pub fn millisecond(&self) -> u16 {
+        self.millisecond
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -350,7 +437,10 @@ pub(crate) fn parse_reply(header: &Header, data: &[u8]) -> Result<Reply> {
 }
 
 pub(crate) fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
-    let text_len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let text_len = data
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(Error::msg("H reply is missing its text terminator"))?;
     let text = std::str::from_utf8(&data[..text_len]).map_err(Error::other)?;
     let Some(call) = text.split_ascii_whitespace().next() else {
         return Ok(vec![]);
@@ -360,7 +450,43 @@ pub(crate) fn parse_callsign_heard(data: &[u8]) -> Result<Vec<CallsignHeard>> {
     let Ok(call) = Call::from_bytes(call.as_bytes()) else {
         return Ok(vec![]);
     };
-    Ok(vec![CallsignHeard { call }])
+
+    let timestamps = data
+        .get(text_len + 1..)
+        .ok_or(Error::msg("H reply is missing timestamps"))?;
+    let first_heard = parse_callsign_heard_timestamp(
+        timestamps
+            .get(..16)
+            .ok_or(Error::msg("H reply is missing its first timestamp"))?,
+    )?;
+    let last_heard = parse_callsign_heard_timestamp(
+        timestamps
+            .get(16..32)
+            .ok_or(Error::msg("H reply is missing its last timestamp"))?,
+    )?;
+
+    Ok(vec![CallsignHeard {
+        call,
+        first_heard,
+        last_heard,
+    }])
+}
+
+fn parse_callsign_heard_timestamp(data: &[u8]) -> Result<CallsignHeardTimestamp> {
+    if data.len() != 16 {
+        return Err(Error::msg("H reply timestamp has the wrong length"));
+    }
+    let (fields, _) = data.as_chunks::<2>();
+    Ok(CallsignHeardTimestamp {
+        year: u16::from_le_bytes(fields[0]),
+        month: u16::from_le_bytes(fields[1]),
+        day_of_week: u16::from_le_bytes(fields[2]),
+        day: u16::from_le_bytes(fields[3]),
+        hour: u16::from_le_bytes(fields[4]),
+        minute: u16::from_le_bytes(fields[5]),
+        second: u16::from_le_bytes(fields[6]),
+        millisecond: u16::from_le_bytes(fields[7]),
+    })
 }
 
 /// An object that has all the metadata needed to be able to create
@@ -1030,12 +1156,31 @@ mod tests {
 
     #[test]
     fn parses_callsign_heard_entry() {
-        assert_eq!(
-            parse_callsign_heard(b"REMOTE-1 Mon,21Feb2000 11:14:30\0ignored").unwrap(),
-            vec![CallsignHeard {
-                call: call("REMOTE-1")
-            }]
-        );
+        let heard = parse_callsign_heard(
+            &[
+                b"REMOTE-1 Mon,21Feb2000 11:14:30\0".as_slice(),
+                &[
+                    0xd0, 0x07, 2, 0, 1, 0, 21, 0, 11, 0, 14, 0, 30, 0, 0, 0, 0xd0, 0x07, 2, 0, 1,
+                    0, 21, 0, 12, 0, 18, 0, 22, 0, 0, 0,
+                ],
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].call(), &call("REMOTE-1"));
+        assert_eq!(heard[0].first_heard().year(), 2000);
+        assert_eq!(heard[0].first_heard().month(), 2);
+        assert_eq!(heard[0].first_heard().day_of_week(), 1);
+        assert_eq!(heard[0].first_heard().day(), 21);
+        assert_eq!(heard[0].first_heard().hour(), 11);
+        assert_eq!(heard[0].first_heard().minute(), 14);
+        assert_eq!(heard[0].first_heard().second(), 30);
+        assert_eq!(heard[0].first_heard().millisecond(), 0);
+        assert_eq!(heard[0].last_heard().hour(), 12);
+        assert_eq!(heard[0].last_heard().minute(), 18);
+        assert_eq!(heard[0].last_heard().second(), 22);
     }
 
     #[test]
@@ -1044,6 +1189,11 @@ mod tests {
             parse_callsign_heard(b"00:00:00 00:00:00\0").unwrap(),
             Vec::<CallsignHeard>::new()
         );
+    }
+
+    #[test]
+    fn rejects_callsign_heard_entry_without_timestamps() {
+        assert!(parse_callsign_heard(b"REMOTE-1 Mon,21Feb2000 11:14:30\0").is_err());
     }
 
     #[test]

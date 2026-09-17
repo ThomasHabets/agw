@@ -1212,8 +1212,22 @@ mod tests {
                 Packet::CallsignHeardQuery(Port(1))
             );
             for data in [
-                b"M0HEARD Mon,21Feb2000 11:14:30\0".to_vec(),
-                b"M0OTHER-3 Mon,21Feb2000 11:14:30\0".to_vec(),
+                [
+                    b"M0HEARD Mon,21Feb2000 11:14:30\0".as_slice(),
+                    &[
+                        0xd0, 0x07, 2, 0, 1, 0, 21, 0, 11, 0, 14, 0, 30, 0, 0, 0, 0xd0, 0x07, 2, 0,
+                        1, 0, 21, 0, 12, 0, 18, 0, 22, 0, 0, 0,
+                    ],
+                ]
+                .concat(),
+                [
+                    b"M0OTHER-3 Mon,21Feb2000 11:14:30\0".as_slice(),
+                    &[
+                        0xd0, 0x07, 2, 0, 1, 0, 21, 0, 11, 0, 14, 0, 30, 0, 0, 0, 0xd0, 0x07, 2, 0,
+                        1, 0, 21, 0, 12, 0, 18, 0, 22, 0, 0, 0,
+                    ],
+                ]
+                .concat(),
             ]
             .into_iter()
             .chain(std::iter::repeat_n(vec![0; 33], 18))
@@ -1231,8 +1245,11 @@ mod tests {
         let agw = AGW::new(&addr).await.unwrap();
         let heard = agw.callsign_heard(Port(1)).await.unwrap();
         assert_eq!(heard.len(), 2);
-        assert_eq!(heard[0].call.to_string(), "M0HEARD");
-        assert_eq!(heard[1].call.to_string(), "M0OTHER-3");
+        assert_eq!(heard[0].call().to_string(), "M0HEARD");
+        assert_eq!(heard[0].first_heard().year(), 2000);
+        assert_eq!(heard[0].first_heard().hour(), 11);
+        assert_eq!(heard[0].last_heard().minute(), 18);
+        assert_eq!(heard[1].call().to_string(), "M0OTHER-3");
         server.await.unwrap();
     }
 }
