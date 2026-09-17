@@ -14,10 +14,12 @@ use std::{
 use anyhow::{Error, Result};
 use clap::Parser;
 use cursive::align::Align;
+use cursive::event::{Event as CursiveEvent, EventResult, Key};
 use cursive::theme::{Color, ColorStyle, ColorType};
 use cursive::view::{Nameable, Resizable, ScrollStrategy, View, ViewWrapper};
 use cursive::views::{
-    Dialog, EditView, EnableableView, LinearLayout, ResizedView, ScrollView, TextContent, TextView,
+    Dialog, EditView, EnableableView, LinearLayout, NamedView, OnEventView, ResizedView,
+    ScrollView, TextContent, TextView,
 };
 use cursive::wrap_impl;
 use cursive::Printer;
@@ -151,6 +153,13 @@ struct ZmodemReceiver {
 enum UiInput {
     Command(String),
     Upload(PathBuf),
+}
+
+type CommandEdit = OnEventView<NamedView<EditView>>;
+type CommandInput = EnableableView<CommandEdit>;
+
+fn delete_input_character<V: View>(input: &mut V) -> EventResult {
+    input.on_event(CursiveEvent::Key(Key::Del))
 }
 
 /// An outgoing transfer. The selected local path is never sent as metadata:
@@ -874,24 +883,29 @@ fn run_ui(
             .child(
                 Dialog::around(
                     EnableableView::new(
-                        EditView::new()
-                            .on_submit(move |s, text| {
-                                if submit_terminated.load(Ordering::Acquire) {
-                                    return;
-                                }
-                                command_tx
-                                    .send(UiInput::Command(text.to_owned() + "\r"))
-                                    .expect("sending command");
-                                s.call_on_name("edit", |e: &mut EditView| {
-                                    e.set_content("");
+                        OnEventView::new(
+                            EditView::new()
+                                .on_submit(move |s, text| {
+                                    if submit_terminated.load(Ordering::Acquire) {
+                                        return;
+                                    }
+                                    command_tx
+                                        .send(UiInput::Command(text.to_owned() + "\r"))
+                                        .expect("sending command");
+                                    s.call_on_name("edit", |e: &mut EditView| {
+                                        e.set_content("");
+                                    })
+                                    .expect("call on name");
                                 })
-                                .expect("call on name");
-                            })
-                            .style(ColorStyle::new(
-                                ColorType::Color(Color::Rgb(0, 0, 0)),
-                                ColorType::Color(Color::Rgb(200, 200, 200)),
-                            ))
-                            .with_name("edit"),
+                                .style(ColorStyle::new(
+                                    ColorType::Color(Color::Rgb(0, 0, 0)),
+                                    ColorType::Color(Color::Rgb(200, 200, 200)),
+                                ))
+                                .with_name("edit"),
+                        )
+                        .on_pre_event_inner(CursiveEvent::CtrlChar('d'), |input, _| {
+                            Some(delete_input_character(input))
+                        }),
                     )
                     .with_name("edit-container"),
                 )
@@ -938,12 +952,9 @@ fn run_ui(
                 let enabled = enabled && !terminated;
                 if status_sink
                     .send(Box::new(move |s| {
-                        let _ = s.call_on_name(
-                            "edit-container",
-                            |view: &mut EnableableView<EditView>| {
-                                view.set_enabled(enabled);
-                            },
-                        );
+                        let _ = s.call_on_name("edit-container", |view: &mut CommandInput| {
+                            view.set_enabled(enabled);
+                        });
                         let _ = s.call_on_name("edit", |view: &mut EditView| {
                             if enabled {
                                 view.enable();
@@ -978,12 +989,9 @@ fn run_ui(
                         }
                     });
                     if mark_terminated {
-                        let _ = s.call_on_name(
-                            "edit-container",
-                            |view: &mut EnableableView<EditView>| {
-                                view.set_enabled(false);
-                            },
-                        );
+                        let _ = s.call_on_name("edit-container", |view: &mut CommandInput| {
+                            view.set_enabled(false);
+                        });
                         let _ = s.call_on_name("edit", |view: &mut EditView| {
                             view.disable();
                         });
@@ -1458,6 +1466,17 @@ fn ascii7_to_str(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn ctrl_d_deletes_the_character_at_the_cursor() {
+        let mut input = EditView::new().content("abc");
+        input.set_cursor(1);
+
+        delete_input_character(&mut input);
+
+        assert_eq!(input.get_content().as_ref(), "ac");
+        assert_eq!(input.get_cursor(), 1);
+    }
 
     #[test]
     fn finds_zmodem_start_sequence() {
