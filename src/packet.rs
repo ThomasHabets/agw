@@ -271,6 +271,34 @@ impl Packet {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::missing_panics_doc)]
     pub fn serialize(&self) -> Result<Vec<u8>> {
+        if let Some(port) = match self {
+            Packet::VersionQuery
+            | Packet::VersionReply { .. }
+            | Packet::PortInfoQuery
+            | Packet::PortInfoReply(_) => None,
+            Packet::FramesOutstandingPortQuery(port)
+            | Packet::FramesOutstandingPortReply(port, _)
+            | Packet::RegisterCallsignReply { port, .. }
+            | Packet::Connect { port, .. }
+            | Packet::IncomingConnect { port, .. }
+            | Packet::ConnectionEstablished { port, .. }
+            | Packet::ConnectionFailed { port, .. }
+            | Packet::ConnectVia { port, .. }
+            | Packet::ConnectViaMarked { port, .. }
+            | Packet::RegisterCallsign(port, _)
+            | Packet::Disconnect { port, .. }
+            | Packet::Data { port, .. }
+            | Packet::Unproto { port, .. }
+            | Packet::CallsignHeardQuery(port)
+            | Packet::CallsignHeardReply { port, .. }
+            | Packet::PortCapQuery(port)
+            | Packet::PortCapReply { port, .. }
+            | Packet::Opaque { port, .. } => Some(*port),
+        } {
+            if port.0 == 0 {
+                return Err(Error::msg("AGW port numbers start at 1"));
+            }
+        }
         Ok(match self {
             Packet::VersionQuery => {
                 Header::new(Port(0), CMD_VERSION, Pid(0), None, None, 0).serialize()
@@ -994,6 +1022,23 @@ mod tests {
             via: vec![hop; 8],
         };
         assert!(packet.serialize().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_port_numbers() {
+        let src: Call = "LOCAL".parse().unwrap();
+        let dst: Call = "REMOTE".parse().unwrap();
+        let packet = Packet::Connect {
+            port: Port(0),
+            pid: Pid(0xf0),
+            src,
+            dst,
+        };
+
+        assert_eq!(
+            packet.serialize().unwrap_err().to_string(),
+            "An error occurred: AGW port numbers start at 1"
+        );
     }
 
     #[test]
