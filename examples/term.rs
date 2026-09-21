@@ -1284,7 +1284,9 @@ fn main() -> Result<()> {
         } => {
             let agw = agw_client.as_mut().expect("AGW client was just created");
             agw.register_callsign(port, &src)?;
+            log::info!("Connecting…");
             let con = agw.connect(port, pid, &src, &dst, &[])?;
+            log::info!("Connected!");
             (
                 TerminalConnection::Agw(con),
                 src.to_string(),
