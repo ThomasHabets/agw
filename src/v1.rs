@@ -978,6 +978,9 @@ impl AGW {
                 Reply::ConnectionFailed(i) => {
                     return Err(Error::msg(format!("connection failed: {}", i.data)));
                 }
+                Reply::Disconnect => {
+                    return Err(Error::msg("connection disconnected during setup"));
+                }
                 other => self.rx_enqueue(head, other),
             }
         }
@@ -1126,6 +1129,33 @@ mod tests {
             parse_reply(&header, b"*** RETRYOUT").unwrap(),
             Reply::ConnectionFailed(_)
         ));
+    }
+
+    #[test]
+    fn connection_setup_reports_disconnect() {
+        let local = call("LOCAL");
+        let remote = call("REMOTE");
+        let (rx_tx, rx) = mpsc::channel();
+        let (tx, _tx_rx) = mpsc::channel();
+        let mut agw = AGW {
+            rx,
+            tx,
+            rxqueue: LinkedList::new(),
+        };
+        rx_tx
+            .send((
+                Header::new(Port(1), b'd', Pid(0), Some(remote), Some(local.clone()), 0),
+                Reply::Disconnect,
+            ))
+            .unwrap();
+
+        let Err(error) = agw.connect(Port(1), Pid(0xf0), &local, &call("REMOTE"), &[]) else {
+            panic!("connection setup unexpectedly succeeded")
+        };
+        assert_eq!(
+            error.to_string(),
+            "An error occurred: connection disconnected during setup"
+        );
     }
 
     #[test]
