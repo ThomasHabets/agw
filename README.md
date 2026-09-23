@@ -36,6 +36,19 @@ $ cargo build --example term
 $ ./target/debug/examples/term -l blah.log -v 4 M0QQQ-3 GB7CIP
 ```
 
+The terminal also supports raw TCP (`--tcp HOST:PORT`) and Mercury ARQ:
+
+```bash
+cargo run --example term -- --mercury localhost M0QQQ-3 GB7CIP
+```
+
+Mercury uses control port 8300 and data port 8301 by default. Use
+`--mercury-port 8400` to select control port 8400 and data port 8401.
+The local and remote callsigns are required; AGW's `-p` and `-P` options
+do not apply. Calling a station transmits over radio. The terminal waits
+up to 120 seconds for the ARQ connection, supports its existing ZMODEM
+transfers, and detects disconnections through Mercury's control socket.
+
 ## Contributing
 
 Pull requests welcome!

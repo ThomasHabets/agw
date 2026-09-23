@@ -29,6 +29,9 @@ use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 
 use agw::{Call, Pid, Port};
 
+#[path = "term/mercury.rs"]
+mod mercury;
+
 const DEFAULT_AGW_ADDR: &str = "127.0.0.1:8010";
 const ZMODEM_START: &[u8] = b"**\x18B00";
 const ZMODEM_TIMEOUT: Duration = Duration::from_secs(100);
@@ -39,6 +42,7 @@ const ZMODEM_UPLOAD_STATUS_REFRESH: Duration = Duration::from_secs(1);
 enum TerminalConnection<'a> {
     Agw(agw::Connection<'a>),
     Tcp(TcpStream),
+    Mercury(mercury::Connection),
 }
 
 #[derive(Clone)]
@@ -48,6 +52,7 @@ enum TerminalWriter {
         writer: agw::MakeWriter,
     },
     Tcp(mpsc::Sender<TcpWrite>),
+    Mercury(mercury::Writer),
 }
 
 enum TcpWrite {
@@ -64,12 +69,14 @@ impl TerminalConnection<'_> {
         match self {
             Self::Agw(connection) => Ok(connection.connect_string().to_string()),
             Self::Tcp(stream) => Ok(format!("Connected to TCP {}", stream.peer_addr()?)),
+            Self::Mercury(connection) => Ok(connection.connect_string().to_string()),
         }
     }
 
     fn read(&mut self) -> Result<Vec<u8>> {
         match self {
             Self::Agw(connection) => connection.read().map_err(Error::from),
+            Self::Mercury(connection) => connection.read(),
             Self::Tcp(stream) => {
                 let mut data = vec![0; 1024];
                 let len = stream.read(&mut data)?;
@@ -84,6 +91,7 @@ impl TerminalConnection<'_> {
 
     fn writer(&mut self) -> Result<TerminalWriter> {
         match self {
+            Self::Mercury(connection) => Ok(TerminalWriter::Mercury(connection.writer())),
             Self::Agw(connection) => Ok(TerminalWriter::Agw {
                 sender: connection.sender(),
                 writer: connection.make_writer(),
@@ -118,6 +126,7 @@ impl TerminalConnection<'_> {
 impl TerminalWriter {
     fn send(&self, data: Vec<u8>) -> Result<()> {
         match self {
+            Self::Mercury(writer) => writer.send(data)?,
             Self::Agw { sender, writer } => {
                 let packet = writer.data(data)?;
                 sender
@@ -133,6 +142,7 @@ impl TerminalWriter {
 
     fn disconnect(&self) -> Result<()> {
         match self {
+            Self::Mercury(writer) => writer.disconnect()?,
             Self::Agw { sender, writer } => sender
                 .send(writer.disconnect()?)
                 .map_err(|e| Error::msg(format!("sending AGW disconnect failed: {e}")))?,
@@ -1096,13 +1106,27 @@ struct Opts {
     #[clap(
         short = 'c',
         long = "agw-addr",
-        conflicts_with = "tcp",
+        conflicts_with_all = ["tcp", "mercury"],
         help = "AGW endpoint (default: 127.0.0.1:8010)"
     )]
     agw_addr: Option<String>,
 
     #[clap(long, help = "Raw TCP endpoint")]
     tcp: Option<String>,
+
+    #[clap(
+        long,
+        conflicts_with = "tcp",
+        help = "Mercury TNC hostname or IP address"
+    )]
+    mercury: Option<String>,
+
+    #[clap(
+        long,
+        requires = "mercury",
+        help = "Mercury control TCP port (default: 8300; data uses the next port)"
+    )]
+    mercury_port: Option<u16>,
 
     src: Option<String>,
     dst: Option<String>,
@@ -1119,16 +1143,39 @@ enum ConnectionOptions {
     Tcp {
         addr: String,
     },
+    Mercury {
+        config: mercury_hf::ClientConfig,
+        src: mercury_hf::Callsign,
+        dst: mercury_hf::Callsign,
+    },
 }
 
 impl Opts {
     fn connection_options(&self) -> Result<ConnectionOptions> {
+        if let Some(host) = &self.mercury {
+            if self.port.is_some() || self.pid.is_some() {
+                return Err(Error::msg("--port and --pid are only valid with AGW"));
+            }
+            let src = self
+                .src
+                .as_deref()
+                .ok_or_else(|| Error::msg("Mercury connections require SRC and DST"))?
+                .parse()?;
+            let dst = self
+                .dst
+                .as_deref()
+                .ok_or_else(|| Error::msg("Mercury connections require SRC and DST"))?
+                .parse()?;
+            let config = mercury_hf::ClientConfig::new(host)
+                .with_base_port(self.mercury_port.unwrap_or(8300))?;
+            return Ok(ConnectionOptions::Mercury { config, src, dst });
+        }
         if let Some(addr) = &self.tcp {
             if self.port.is_some() || self.pid.is_some() {
                 return Err(Error::msg("--port and --pid are only valid with AGW"));
             }
             if self.src.is_some() || self.dst.is_some() {
-                return Err(Error::msg("SRC and DST are only valid with AGW"));
+                return Err(Error::msg("SRC and DST require AGW or Mercury"));
             }
             return Ok(ConnectionOptions::Tcp { addr: addr.clone() });
         }
@@ -1272,9 +1319,17 @@ fn main() -> Result<()> {
 
     let mut agw_client = match &connection_options {
         ConnectionOptions::Agw { addr, .. } => Some(agw::AGW::new(addr)?),
-        ConnectionOptions::Tcp { .. } => None,
+        ConnectionOptions::Tcp { .. } | ConnectionOptions::Mercury { .. } => None,
     };
     let (mut con, local_label, remote_label) = match connection_options {
+        ConnectionOptions::Mercury { config, src, dst } => {
+            let local = src.to_string();
+            let remote = dst.to_string();
+            log::info!("Connecting via Mercury…");
+            let con = mercury::Connection::connect(config, src, dst)?;
+            log::info!("Connected!");
+            (TerminalConnection::Mercury(con), local, remote)
+        }
         ConnectionOptions::Agw {
             addr: _,
             port,
@@ -1653,6 +1708,82 @@ mod tests {
     }
 
     #[test]
+    fn selects_mercury_and_validates_its_options() {
+        let options = Opts::try_parse_from([
+            "term",
+            "--mercury",
+            "localhost",
+            "--mercury-port",
+            "8400",
+            "LONGCALLSIGN-12",
+            "REMOTE",
+        ])
+        .unwrap()
+        .connection_options()
+        .unwrap();
+        let ConnectionOptions::Mercury { config, src, dst } = options else {
+            panic!("expected Mercury");
+        };
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.control_port, 8400);
+        assert_eq!(config.data_port, 8401);
+        assert_eq!(src.to_string(), "LONGCALLSIGN-12");
+        assert_eq!(dst.to_string(), "REMOTE");
+
+        for args in [
+            vec!["term", "--mercury", "localhost"],
+            vec![
+                "term",
+                "--mercury",
+                "localhost",
+                "LOCAL",
+                "REMOTE",
+                "-p",
+                "1",
+            ],
+            vec![
+                "term",
+                "--mercury",
+                "localhost",
+                "LOCAL",
+                "REMOTE",
+                "-P",
+                "240",
+            ],
+            vec![
+                "term",
+                "--mercury",
+                "localhost",
+                "LOCAL",
+                "REMOTE",
+                "--mercury-port",
+                "0",
+            ],
+            vec![
+                "term",
+                "--mercury",
+                "localhost",
+                "LOCAL",
+                "REMOTE",
+                "--mercury-port",
+                "65535",
+            ],
+        ] {
+            assert!(Opts::try_parse_from(args)
+                .unwrap()
+                .connection_options()
+                .is_err());
+        }
+        for args in [
+            vec!["term", "--mercury", "localhost", "--tcp", "localhost:23"],
+            vec!["term", "--mercury", "localhost", "-c", "localhost:8000"],
+            vec!["term", "--mercury-port", "8400", "LOCAL", "REMOTE"],
+        ] {
+            assert!(Opts::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
     fn uses_agw_defaults_when_tcp_is_not_requested() {
         let options = Opts::try_parse_from(["term", "M0THC", "GB7CIP"])
             .expect("parsing AGW options")
@@ -1666,7 +1797,7 @@ mod tests {
                 assert_eq!(port, Port(0));
                 assert_eq!(pid, Pid(240));
             }
-            ConnectionOptions::Tcp { .. } => panic!("selected TCP instead of AGW"),
+            _ => panic!("selected another transport instead of AGW"),
         }
     }
 

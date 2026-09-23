@@ -32,6 +32,7 @@ chrono = { version = "0.4.37", features = ["serde"] }
 tokio = { version = "1.37.0", features = ["full"] }
 anyhow = "1.0.102"
 zmodem2 = "0.7.2"
+mercury-hf = { version = "0.1.1", default-features = false, features = ["async"] }
 
 [lib]
 name = "agw"
