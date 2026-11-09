@@ -19,6 +19,8 @@ enum Command {
     Connect {
         src: String,
         dst: String,
+        #[arg(value_parser = parse_port)]
+        port: Port,
     },
     Version {},
     FramesOutstandingPort {
@@ -89,10 +91,9 @@ fn main2(opt: Cli, agw: &agw::v2::AGW) -> Result<()> {
                 &msg.into_bytes(),
             )?;
         }
-        Command::Connect { src, dst } => {
+        Command::Connect { src, dst, port } => {
             let mut buf = [0u8; 128];
 
-            let port = agw::Port(0); // TODO
             let src = &Call::from_str(&src)?;
             agw.register_callsign(port, src)?;
             let mut con = agw.connect(agw::v2::ConnectRequest::new(
