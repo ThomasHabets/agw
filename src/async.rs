@@ -479,14 +479,80 @@ impl Pipo {
     }
 }
 
+struct ServerReceiveState {
+    header_bytes: [u8; HEADER_LEN],
+    header_read: usize,
+    header: Option<crate::Header>,
+    payload: Vec<u8>,
+    payload_read: usize,
+    error: Option<Error>,
+}
+
+impl Default for ServerReceiveState {
+    fn default() -> Self {
+        Self {
+            header_bytes: [0; HEADER_LEN],
+            header_read: 0,
+            header: None,
+            payload: Vec::new(),
+            payload_read: 0,
+            error: None,
+        }
+    }
+}
+
+impl ServerReceiveState {
+    async fn recv(&mut self, read: &mut (impl AsyncRead + Unpin)) -> Result<Packet> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        // Only framing/transport errors are terminal. Once a complete frame
+        // has been consumed, even a packet decoding error preserves alignment.
+        if let Err(error) = self.read_frame(read).await {
+            self.error = Some(error.clone());
+            return Err(error);
+        }
+        let header = self.header.take().expect("complete frame has a header");
+        self.header_read = 0;
+        self.payload_read = 0;
+        let packet = Packet::parse(&header, &self.payload);
+        self.payload.clear();
+        packet
+    }
+
+    async fn read_frame(&mut self, read: &mut (impl AsyncRead + Unpin)) -> Result<()> {
+        while self.header_read < HEADER_LEN {
+            let n = read
+                .read(&mut self.header_bytes[self.header_read..])
+                .await?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            self.header_read += n;
+        }
+        if self.header.is_none() {
+            let header = parse_header(&self.header_bytes)?;
+            self.payload.resize(crate::payload_len(header.data_len)?, 0);
+            self.header = Some(header);
+        }
+        while self.payload_read < self.payload.len() {
+            let n = read.read(&mut self.payload[self.payload_read..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            self.payload_read += n;
+        }
+        Ok(())
+    }
+}
+
 /// Packet-oriented AGW server-side connection wrapper.
 ///
-/// This is intended for code that is implementing an AGW server rather than
-/// talking to one. It does not spawn background tasks or route packets to
-/// per-connection objects; it simply reads and writes `Packet` values on a
-/// single accepted TCP stream.
+/// This is intended for code implementing an AGW server. It reads and writes
+/// `Packet` values on a single accepted TCP stream without background tasks.
 pub struct AGWServer {
     con: TcpStream,
+    receive: ServerReceiveState,
 }
 
 impl AGWServer {
@@ -494,12 +560,21 @@ impl AGWServer {
     #[must_use]
     pub fn into_split(self) -> (AGWServerReader, AGWServerWriter) {
         let (read, write) = self.con.into_split();
-        (AGWServerReader { read }, AGWServerWriter { write })
+        (
+            AGWServerReader {
+                read,
+                receive: self.receive,
+            },
+            AGWServerWriter { write },
+        )
     }
     /// Wrap an accepted AGW TCP connection.
     #[must_use]
     pub fn new(con: TcpStream) -> Self {
-        Self { con }
+        Self {
+            con,
+            receive: ServerReceiveState::default(),
+        }
     }
 
     /// Return the peer socket address.
@@ -521,18 +596,24 @@ impl AGWServer {
     }
 
     /// Borrow the underlying TCP stream.
+    ///
+    /// Do not interleave direct socket reads with `recv`: part of a frame
+    /// may already be buffered by a cancelled receive.
     #[must_use]
     pub fn get_ref(&self) -> &TcpStream {
         &self.con
     }
 
     /// Mutably borrow the underlying TCP stream.
+    ///
+    /// Do not interleave direct socket reads with framed receives.
     #[must_use]
     pub fn get_mut(&mut self) -> &mut TcpStream {
         &mut self.con
     }
 
     /// Consume the wrapper and return the underlying TCP stream.
+    /// Any partial frame buffered by a cancelled receive is discarded.
     #[must_use]
     pub fn into_inner(self) -> TcpStream {
         self.con
@@ -540,21 +621,17 @@ impl AGWServer {
 
     /// Receive the next AGW packet from the client.
     ///
+    /// Cancellation safe: dropping this future preserves any partial frame
+    /// so the next call resumes where it stopped. `into_split` also preserves
+    /// this state.
+    ///
     /// # Errors
     ///
     /// If the TCP stream fails or the AGW packet is malformed.
+    /// Transport and framing errors are terminal and repeated on later calls.
+    /// A decoding error for a complete frame allows reading the next frame.
     pub async fn recv(&mut self) -> Result<Packet> {
-        let mut header = [0_u8; HEADER_LEN];
-        self.con.read_exact(&mut header).await?;
-        let header = parse_header(&header)?;
-        let payload = if header.data_len > 0 {
-            let mut payload = vec![0; crate::payload_len(header.data_len)?];
-            self.con.read_exact(&mut payload).await?;
-            payload
-        } else {
-            Vec::new()
-        };
-        Packet::parse(&header, &payload)
+        self.receive.recv(&mut self.con).await
     }
 
     /// Send an AGW packet to the client.
@@ -569,22 +646,21 @@ impl AGWServer {
     }
 }
 
-/// Read half. Drive `recv` in a dedicated task; do not cancel it mid-frame.
+/// Read half of an accepted AGW connection, retaining partial frames.
 pub struct AGWServerReader {
     read: OwnedReadHalf,
+    receive: ServerReceiveState,
 }
 impl AGWServerReader {
-    /// Receive one frame. Do not cancel midway through a frame.
+    /// Receive one frame. Cancellation safe: the next call resumes any partial
+    /// frame consumed before this future was dropped.
     ///
     /// # Errors
     /// Returns transport and malformed frame errors.
+    /// Transport and framing errors are terminal and repeated on later calls.
+    /// A decoding error for a complete frame allows reading the next frame.
     pub async fn recv(&mut self) -> Result<Packet> {
-        let mut bytes = [0; HEADER_LEN];
-        self.read.read_exact(&mut bytes).await?;
-        let header = parse_header(&bytes)?;
-        let mut payload = vec![0; crate::payload_len(header.data_len)?];
-        self.read.read_exact(&mut payload).await?;
-        Packet::parse(&header, &payload)
+        self.receive.recv(&mut self.read).await
     }
 }
 /// Write half of an accepted AGW connection.
@@ -595,6 +671,142 @@ pub struct AGWServerWriter {
 #[cfg(test)]
 mod split_server_tests {
     use super::*;
+
+    // Poll once to consume available bytes, then cancel exactly at Pending.
+    // This avoids relying on timeouts or scheduler timing to trigger cancellation.
+    async fn cancel_pending<T>(future: impl Future<Output = T>) {
+        tokio::pin!(future);
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn server_pair() -> (TcpStream, AGWServer) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let application = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        (application, AGWServer::new(socket))
+    }
+
+    #[tokio::test]
+    async fn cancelled_server_receive_resumes_header_and_payload() {
+        let (mut application, mut server) = server_pair().await;
+        let packet = Packet::VersionReply {
+            major: 2005,
+            minor: 127,
+        };
+        let bytes = packet.serialize().unwrap();
+        let mut start = 0;
+        for end in [10, HEADER_LEN, HEADER_LEN + 3] {
+            application.write_all(&bytes[start..end]).await.unwrap();
+            server.con.readable().await.unwrap();
+            cancel_pending(server.recv()).await;
+            assert_eq!(server.receive.header_read, end.min(HEADER_LEN));
+            assert_eq!(server.receive.payload_read, end.saturating_sub(HEADER_LEN));
+            start = end;
+        }
+        application.write_all(&bytes[start..]).await.unwrap();
+        application
+            .write_all(&Packet::VersionQuery.serialize().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            server.recv().await.unwrap(),
+            Packet::VersionReply {
+                major: 2005,
+                minor: 127
+            }
+        ));
+        assert!(matches!(server.recv().await.unwrap(), Packet::VersionQuery));
+    }
+
+    #[tokio::test]
+    async fn split_preserves_cancelled_receive_and_reader_can_resume() {
+        let (mut application, mut server) = server_pair().await;
+        let bytes = Packet::VersionReply {
+            major: 2005,
+            minor: 127,
+        }
+        .serialize()
+        .unwrap();
+        application.write_all(&bytes[..10]).await.unwrap();
+        server.con.readable().await.unwrap();
+        cancel_pending(server.recv()).await;
+        assert_eq!(server.receive.header_read, 10);
+        let (mut reader, _writer) = server.into_split();
+        application
+            .write_all(&bytes[10..HEADER_LEN + 2])
+            .await
+            .unwrap();
+        reader.read.readable().await.unwrap();
+        cancel_pending(reader.recv()).await;
+        assert_eq!(reader.receive.payload_read, 2);
+        application
+            .write_all(&bytes[HEADER_LEN + 2..])
+            .await
+            .unwrap();
+        application
+            .write_all(&Packet::VersionQuery.serialize().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            reader.recv().await.unwrap(),
+            Packet::VersionReply {
+                major: 2005,
+                minor: 127
+            }
+        ));
+        assert!(matches!(reader.recv().await.unwrap(), Packet::VersionQuery));
+    }
+
+    #[tokio::test]
+    async fn receive_errors_preserve_or_terminate_framing() {
+        // EOF at either stage is terminal, even when recv is called again.
+        let bytes = Packet::VersionReply { major: 1, minor: 2 }
+            .serialize()
+            .unwrap();
+        for end in [0, 10, HEADER_LEN + 2] {
+            let (mut writer, mut reader) = tokio::io::duplex(128);
+            writer.write_all(&bytes[..end]).await.unwrap();
+            drop(writer);
+            let mut state = ServerReceiveState::default();
+            let error = state.recv(&mut reader).await.unwrap_err().to_string();
+            assert_eq!(
+                state.recv(&mut reader).await.unwrap_err().to_string(),
+                error
+            );
+        }
+
+        // A complete but invalid R payload does not consume the following frame.
+        let (mut writer, mut reader) = tokio::io::duplex(128);
+        let mut malformed = bytes[..HEADER_LEN].to_vec();
+        malformed[28..32].copy_from_slice(&1_u32.to_le_bytes());
+        malformed.push(0);
+        writer.write_all(&malformed).await.unwrap();
+        writer
+            .write_all(&Packet::VersionQuery.serialize().unwrap())
+            .await
+            .unwrap();
+        let mut state = ServerReceiveState::default();
+        assert!(state.recv(&mut reader).await.is_err());
+        assert!(matches!(
+            state.recv(&mut reader).await.unwrap(),
+            Packet::VersionQuery
+        ));
+
+        // An invalid length cannot establish a safe next-frame boundary.
+        malformed[28..32].copy_from_slice(&(crate::MAX_PAYLOAD_LEN + 1).to_le_bytes());
+        writer.write_all(&malformed[..HEADER_LEN]).await.unwrap();
+        let error = state.recv(&mut reader).await.unwrap_err().to_string();
+        assert_eq!(
+            state.recv(&mut reader).await.unwrap_err().to_string(),
+            error
+        );
+    }
 
     #[tokio::test]
     async fn partial_request_does_not_block_unsolicited_reply() {
