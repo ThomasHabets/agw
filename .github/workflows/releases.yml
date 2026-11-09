@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           run_id="$(gh run list --repo "$GITHUB_REPOSITORY" \
-            --workflow rust.yml --branch main --event push \
+            --workflow tests.yml --branch main --event push \
             --commit "$GITHUB_SHA" --limit 1 \
             --json databaseId --jq '.[0].databaseId // empty')"
           if [ -z "$run_id" ]; then
