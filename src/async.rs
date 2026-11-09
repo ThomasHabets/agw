@@ -925,6 +925,13 @@ impl AGW {
     /// one second for all replies and serializes queries because their replies
     /// cannot identify the requesting client.
     ///
+    /// # Cancellation safety
+    ///
+    /// If cancelling before all replies have been received, a retry could
+    /// receive a mishmash of callsigns. Because the AGW protocol doesn't have
+    /// request IDs, this is unavoidable in the general case, so just Don't Do
+    /// That. The repercussions are not too bad, though.
+    ///
     /// # Errors
     ///
     /// Returns an error if the AGW endpoint fails to send all responses.
