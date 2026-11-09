@@ -326,7 +326,14 @@ impl Router {
                                 server_state.buffered.clear();
                             }
                         }
-                        tx.send(packet.clone()).await.map_err(Error::other)?;
+                        if let Err(e) = tx.send(packet.clone()).await {
+                            // A route can disappear while this cloned snapshot
+                            // is waiting for capacity. That ends only the route,
+                            // not the shared AGW transport.
+                            debug!("Route receiver send fail: {e}");
+                            self.del(rule.ident);
+                            continue;
+                        }
                     }
                     RuleSink::Listener(tx) => {
                         let Packet::IncomingConnect {
@@ -374,17 +381,24 @@ impl Router {
                             txd,
                             server_state.clone(),
                         );
-                        tx.send(PendingConnection {
-                            port: *port,
-                            pid: PID_AX25, // IncomingConnect always has pid 0x00.
-                            src: dst.clone(),
-                            dst: src.clone(),
-                            rule_handle,
-                            rx: rxd,
-                            server_state,
-                        })
-                        .await
-                        .map_err(Error::other)?;
+                        if let Err(e) = tx
+                            .send(PendingConnection {
+                                port: *port,
+                                pid: PID_AX25, // IncomingConnect always has pid 0x00.
+                                src: dst.clone(),
+                                dst: src.clone(),
+                                rule_handle,
+                                rx: rxd,
+                                server_state,
+                            })
+                            .await
+                        {
+                            // Dropping the failed send also drops the pending
+                            // connection's handle, removing its data route.
+                            debug!("Route receiver PendingConnection send fail: {e}");
+                            self.del(rule.ident);
+                            continue;
+                        }
                     }
                 }
                 any = true;
@@ -1496,6 +1510,113 @@ impl AsyncWrite for Connection<'_> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn dropped_receiver_during_delivery_does_not_stop_other_routes() {
+        let router = Arc::new(Router::new());
+        let matcher = RuleMatch::Data {
+            port: Port(1),
+            src: "REMOTE".parse().unwrap(),
+            dst: "LOCAL".parse().unwrap(),
+        };
+        let packet = Packet::Data {
+            port: Port(1),
+            pid: PID_AX25,
+            src: "REMOTE".parse().unwrap(),
+            dst: "LOCAL".parse().unwrap(),
+            data: b"hello".to_vec(),
+        };
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(packet.clone()).await.unwrap();
+        let handle = router.add(matcher.clone(), tx);
+        let (live_tx, mut live_rx) = mpsc::channel(1);
+        let _live_handle = router.add(matcher, live_tx);
+        let delivery = router.process(packet.clone());
+        tokio::pin!(delivery);
+        std::future::poll_fn(|cx| {
+            assert!(delivery.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        // Simulate cancellation of the task owning a Connection.
+        drop(handle);
+        drop(rx);
+        assert!(delivery.await.unwrap());
+        assert_eq!(live_rx.recv().await.unwrap(), packet);
+        assert_eq!(router.rules.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_listener_during_delivery_cleans_up_pending_connections() {
+        let router = Arc::new(Router::new());
+        let local: Call = "LOCAL".parse().unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let handle = router.add_incoming_listener(Port(1), local.clone(), tx);
+        let incoming = |remote: &str| Packet::IncomingConnect {
+            port: Port(1),
+            pid: Pid(0),
+            src: remote.parse().unwrap(),
+            dst: local.clone(),
+        };
+        router.process(incoming("FIRST")).await.unwrap();
+        let delivery = router.process(incoming("SECOND"));
+        tokio::pin!(delivery);
+        std::future::poll_fn(|cx| {
+            assert!(delivery.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(handle);
+        drop(rx);
+        assert!(!delivery.await.unwrap());
+        assert_eq!(router.rules.lock().unwrap().len(), 0);
+        for remote in ["FIRST", "SECOND"] {
+            assert!(router
+                .get_server_connection(&ServerConnectionKey {
+                    port: Port(1),
+                    local: local.clone(),
+                    remote: remote.parse().unwrap(),
+                })
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_route_does_not_close_shared_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let agw = AGW::new(&listener.local_addr().unwrap().to_string())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut server = AGWServer::new(stream);
+        let matcher = RuleMatch::Data {
+            port: Port(1),
+            src: "REMOTE".parse().unwrap(),
+            dst: "LOCAL".parse().unwrap(),
+        };
+        let (tx, rx) = mpsc::channel(1);
+        let _stale = agw.router.add(matcher.clone(), tx);
+        drop(rx);
+        let (tx, mut live_rx) = mpsc::channel(1);
+        let _live = agw.router.add(matcher, tx);
+        let packet = Packet::Data {
+            port: Port(1),
+            pid: PID_AX25,
+            src: "REMOTE".parse().unwrap(),
+            dst: "LOCAL".parse().unwrap(),
+            data: b"hello".to_vec(),
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            server.send(&packet).await.unwrap();
+            assert_eq!(live_rx.recv().await.unwrap(), packet);
+            agw.send(Packet::VersionQuery).await.unwrap();
+            assert_eq!(server.recv().await.unwrap(), Packet::VersionQuery);
+            server.send(&packet).await.unwrap();
+            assert_eq!(live_rx.recv().await.unwrap(), packet);
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn cancelled_write_uses_the_next_buffer() {
