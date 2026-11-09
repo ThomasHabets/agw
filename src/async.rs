@@ -490,6 +490,12 @@ pub struct AGWServer {
 }
 
 impl AGWServer {
+    /// Split ownership for dedicated reader and writer tasks.
+    #[must_use]
+    pub fn into_split(self) -> (AGWServerReader, AGWServerWriter) {
+        let (read, write) = self.con.into_split();
+        (AGWServerReader { read }, AGWServerWriter { write })
+    }
     /// Wrap an accepted AGW TCP connection.
     #[must_use]
     pub fn new(con: TcpStream) -> Self {
@@ -559,6 +565,114 @@ impl AGWServer {
     pub async fn send(&mut self, packet: &Packet) -> Result<()> {
         let bytes = packet.serialize()?;
         self.con.write_all(&bytes).await?;
+        Ok(())
+    }
+}
+
+/// Read half. Drive `recv` in a dedicated task; do not cancel it mid-frame.
+pub struct AGWServerReader {
+    read: OwnedReadHalf,
+}
+impl AGWServerReader {
+    /// Receive one frame. Do not cancel midway through a frame.
+    ///
+    /// # Errors
+    /// Returns transport and malformed frame errors.
+    pub async fn recv(&mut self) -> Result<Packet> {
+        let mut bytes = [0; HEADER_LEN];
+        self.read.read_exact(&mut bytes).await?;
+        let header = parse_header(&bytes)?;
+        let mut payload = vec![0; crate::payload_len(header.data_len)?];
+        self.read.read_exact(&mut payload).await?;
+        Packet::parse(&header, &payload)
+    }
+}
+/// Write half of an accepted AGW connection.
+pub struct AGWServerWriter {
+    write: OwnedWriteHalf,
+}
+
+#[cfg(test)]
+mod split_server_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn partial_request_does_not_block_unsolicited_reply() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut application = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let (mut reader, mut writer) = AGWServer::new(socket).into_split();
+        let request = Packet::VersionQuery.serialize().unwrap();
+        application.write_all(&request[..10]).await.unwrap();
+        let (received, ()) = tokio::join!(reader.recv(), async {
+            writer
+                .send(&Packet::VersionReply {
+                    major: 2005,
+                    minor: 127,
+                })
+                .await
+                .unwrap();
+            let mut bytes = [0; HEADER_LEN + 8];
+            application.read_exact(&mut bytes).await.unwrap();
+            assert!(matches!(
+                Packet::parse(
+                    &parse_header(bytes[..HEADER_LEN].try_into().unwrap()).unwrap(),
+                    &bytes[HEADER_LEN..]
+                )
+                .unwrap(),
+                Packet::VersionReply {
+                    major: 2005,
+                    minor: 127
+                }
+            ));
+            application.write_all(&request[10..]).await.unwrap();
+        });
+        assert!(matches!(received.unwrap(), Packet::VersionQuery));
+    }
+
+    #[test]
+    fn unregister_and_queue_wire_fixtures() {
+        let mut header = [0; HEADER_LEN];
+        header[4] = b'x';
+        header[8..13].copy_from_slice(b"LOCAL");
+        let packet = Packet::parse(&parse_header(&header).unwrap(), &[]).unwrap();
+        assert!(matches!(
+            packet,
+            Packet::UnregisterCallsign(crate::Port(1), _)
+        ));
+        assert_eq!(packet.serialize().unwrap(), header);
+        header[4] = b'Y';
+        header[18..24].copy_from_slice(b"REMOTE");
+        let query = Packet::parse(&parse_header(&header).unwrap(), &[]).unwrap();
+        assert!(matches!(
+            query,
+            Packet::FramesOutstandingConnectionQuery { .. }
+        ));
+        assert_eq!(query.serialize().unwrap(), header);
+        header[28] = 4;
+        let packet =
+            Packet::parse(&parse_header(&header).unwrap(), &[0x78, 0x56, 0x34, 0x12]).unwrap();
+        assert!(matches!(
+            packet,
+            Packet::FramesOutstandingConnectionReply {
+                count: 0x1234_5678,
+                ..
+            }
+        ));
+        let bytes = packet.serialize().unwrap();
+        assert_eq!(&bytes[HEADER_LEN..], [0x78, 0x56, 0x34, 0x12]);
+        assert!(Packet::parse(&parse_header(&header).unwrap(), &[1]).is_err());
+    }
+}
+impl AGWServerWriter {
+    /// Send one complete frame.
+    ///
+    /// # Errors
+    /// Returns encoding and transport errors.
+    pub async fn send(&mut self, packet: &Packet) -> Result<()> {
+        self.write.write_all(&packet.serialize()?).await?;
         Ok(())
     }
 }
