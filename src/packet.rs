@@ -114,6 +114,18 @@ pub enum Packet {
     PortInfoReply(PortsInfo),
 
     RegisterCallsign(Port, Call),
+    UnregisterCallsign(Port, Call),
+    FramesOutstandingConnectionQuery {
+        port: Port,
+        src: Call,
+        dst: Call,
+    },
+    FramesOutstandingConnectionReply {
+        port: Port,
+        src: Call,
+        dst: Call,
+        count: u32,
+    },
     Connect {
         port: Port,
         pid: Pid,
@@ -286,6 +298,9 @@ impl Packet {
             | Packet::ConnectVia { port, .. }
             | Packet::ConnectViaMarked { port, .. }
             | Packet::RegisterCallsign(port, _)
+            | Packet::UnregisterCallsign(port, _)
+            | Packet::FramesOutstandingConnectionQuery { port, .. }
+            | Packet::FramesOutstandingConnectionReply { port, .. }
             | Packet::Disconnect { port, .. }
             | Packet::Data { port, .. }
             | Packet::Unproto { port, .. }
@@ -300,6 +315,24 @@ impl Packet {
             }
         }
         Ok(match self {
+            Packet::UnregisterCallsign(port, call) => {
+                Header::new(*port, b'x', Pid(0), Some(call.clone()), None, 0).serialize()
+            }
+            Packet::FramesOutstandingConnectionQuery { port, src, dst } => {
+                Header::new(*port, b'Y', Pid(0), Some(src.clone()), Some(dst.clone()), 0)
+                    .serialize()
+            }
+            Packet::FramesOutstandingConnectionReply {
+                port,
+                src,
+                dst,
+                count,
+            } => [
+                Header::new(*port, b'Y', Pid(0), Some(src.clone()), Some(dst.clone()), 4)
+                    .serialize(),
+                count.to_le_bytes().to_vec(),
+            ]
+            .concat(),
             Packet::VersionQuery => {
                 Header::new(Port(0), CMD_VERSION, Pid(0), None, None, 0).serialize()
             }
@@ -736,6 +769,39 @@ impl Packet {
                         src,
                         dst,
                         via,
+                    }
+                }
+            }
+            b'x' => {
+                if !data.is_empty() {
+                    return Err(Error::msg("unregister payload must be empty"));
+                }
+                Packet::UnregisterCallsign(
+                    header.port,
+                    header.src.clone().ok_or(Error::msg("missing callsign"))?,
+                )
+            }
+            b'Y' => {
+                let src = header.src.clone().ok_or(Error::msg("missing source"))?;
+                let dst = header
+                    .dst
+                    .clone()
+                    .ok_or(Error::msg("missing destination"))?;
+                if data.is_empty() {
+                    Packet::FramesOutstandingConnectionQuery {
+                        port: header.port,
+                        src,
+                        dst,
+                    }
+                } else {
+                    Packet::FramesOutstandingConnectionReply {
+                        port: header.port,
+                        src,
+                        dst,
+                        count: u32::from_le_bytes(
+                            data.try_into()
+                                .map_err(|_| Error::msg("invalid queue count length"))?,
+                        ),
                     }
                 }
             }

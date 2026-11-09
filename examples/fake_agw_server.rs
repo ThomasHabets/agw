@@ -212,7 +212,19 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
             | Packet::PortCapReply { .. }
             | Packet::CallsignHeardReply { .. }
             | Packet::PortInfoReply(_)
-            | Packet::Opaque { .. } => {}
+            | Packet::Opaque { .. }
+            | Packet::UnregisterCallsign(..)
+            | Packet::FramesOutstandingConnectionReply { .. } => {}
+            Packet::FramesOutstandingConnectionQuery { port, src, dst } => {
+                server
+                    .send(&Packet::FramesOutstandingConnectionReply {
+                        port,
+                        src,
+                        dst,
+                        count: 0,
+                    })
+                    .await?;
+            }
         }
     }
 }
