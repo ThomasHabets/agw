@@ -41,7 +41,7 @@ impl Call {
                     "callsign includes invalid character {item:?}"
                 )));
             }
-            arr[i] = item;
+            arr[i] = item.to_ascii_uppercase();
         }
         Ok(Call { bytes: arr })
     }
