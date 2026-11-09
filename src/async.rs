@@ -1338,30 +1338,6 @@ impl Connection<'_> {
         self.read_buf.drain(..n);
     }
 
-    fn poll_pending_write(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<usize>> {
-        let Some(pending) = self.pending_write.as_mut() else {
-            return Poll::Ready(Ok(0));
-        };
-        match pending.fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) => {
-                let len = pending.len;
-                let packet = pending.packet.clone();
-                self.pending_write = None;
-                self.buffer_server_data(&packet);
-                Poll::Ready(Ok(len))
-            }
-            Poll::Ready(Err(e)) => {
-                self.pending_write = None;
-                self.disconnected = true;
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    e.to_string(),
-                )))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
     fn poll_pending_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let Some(pending) = self.pending_shutdown.as_mut() else {
             return Poll::Ready(Ok(()));
@@ -1388,11 +1364,15 @@ impl Connection<'_> {
 type PendingSend =
     Pin<Box<dyn Future<Output = std::result::Result<(), mpsc::error::SendError<Packet>>> + Send>>;
 
-struct PendingWrite {
-    len: usize,
-    packet: Packet,
-    fut: PendingSend,
-}
+// Retain only the capacity wait across polls. A cancelled write must never
+// retain bytes that could be sent or counted against a subsequent buffer.
+type PendingWrite = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>,
+            > + Send,
+    >,
+>;
 
 impl AsyncRead for Connection<'_> {
     fn poll_read(
@@ -1458,40 +1438,43 @@ impl AsyncWrite for Connection<'_> {
                 "connection disconnected",
             )));
         }
-        match this.poll_pending_write(cx) {
-            Poll::Ready(Ok(n)) if n > 0 => return Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Ok(_)) => {}
-        }
         if buf.is_empty() {
+            this.pending_write = None;
             return Poll::Ready(Ok(0));
         }
+        if this.pending_write.is_none() {
+            this.pending_write = Some(Box::pin(this.agw.con.tx.clone().reserve_owned()));
+        }
+        let permit = match this.pending_write.as_mut().unwrap().as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            Poll::Ready(Err(e)) => {
+                this.pending_write = None;
+                this.disconnected = true;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    e.to_string(),
+                )));
+            }
+            Poll::Pending => return Poll::Pending,
+        };
+        this.pending_write = None;
         let packet = this.data_packet(buf.to_vec());
-        this.pending_write = Some(PendingWrite {
-            len: buf.len(),
-            packet: packet.clone(),
-            fut: this.send_future(packet),
-        });
-        this.poll_pending_write(cx)
+        this.buffer_server_data(&packet);
+        permit.send(packet);
+        Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        match this.poll_pending_write(cx) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
+        // Completed writes are already queued; a pending reservation has no
+        // accepted bytes to flush. Release it so other senders can progress.
+        this.pending_write = None;
+        Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        match this.poll_pending_write(cx) {
-            Poll::Ready(Ok(_)) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
+        this.pending_write = None;
         if this.disconnected && this.pending_shutdown.is_none() {
             return Poll::Ready(Ok(()));
         }
@@ -1506,6 +1489,101 @@ impl AsyncWrite for Connection<'_> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn cancelled_write_uses_the_next_buffer() {
+        // A controlled outgoing queue makes backpressure deterministic.
+        for replacement in [b"XYZ".as_slice(), b"Z", b""] {
+            let (tx, mut outgoing) = mpsc::channel(1);
+            tx.send(Packet::VersionQuery).await.unwrap();
+            let (_error_tx, error) = watch::channel(None);
+            let agw = AGW {
+                con: Pipo { tx, error },
+                router: Arc::new(Router::new()),
+                heard_query: AsyncMutex::new(()),
+            };
+            let (_tx, rx) = mpsc::channel(1);
+            let state = Arc::new(Mutex::new(ServerConnectionState::default()));
+            let mut con = agw.make_connection(
+                Port(1),
+                PID_AX25,
+                "LOCAL".parse().unwrap(),
+                "REMOTE".parse().unwrap(),
+                RuleHandle::new(0, Weak::new()),
+                rx,
+                Some(state.clone()),
+            );
+            {
+                let write = con.write(b"ABC");
+                tokio::pin!(write);
+                std::future::poll_fn(|cx| {
+                    assert!(write.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert_eq!(outgoing.recv().await.unwrap(), Packet::VersionQuery);
+            assert_eq!(con.write(replacement).await.unwrap(), replacement.len());
+            if replacement.is_empty() {
+                assert!(outgoing.try_recv().is_err());
+                assert_eq!(state.lock().unwrap().buffered, Vec::<Packet>::new());
+            } else {
+                let packet = outgoing.recv().await.unwrap();
+                assert!(matches!(&packet, Packet::Data { data, .. } if data == replacement));
+                assert_eq!(state.lock().unwrap().buffered, vec![packet]);
+            }
+            assert!(outgoing.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_write_is_not_sent_by_flush_or_shutdown() {
+        for shutdown in [false, true] {
+            let (tx, mut outgoing) = mpsc::channel(1);
+            tx.send(Packet::VersionQuery).await.unwrap();
+            let (_error_tx, error) = watch::channel(None);
+            let agw = AGW {
+                con: Pipo { tx, error },
+                router: Arc::new(Router::new()),
+                heard_query: AsyncMutex::new(()),
+            };
+            let (_tx, rx) = mpsc::channel(1);
+            let mut con = agw.make_connection(
+                Port(1),
+                PID_AX25,
+                "LOCAL".parse().unwrap(),
+                "REMOTE".parse().unwrap(),
+                RuleHandle::new(0, Weak::new()),
+                rx,
+                None,
+            );
+            {
+                let write = con.write(b"ABC");
+                tokio::pin!(write);
+                std::future::poll_fn(|cx| {
+                    assert!(write.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            if shutdown {
+                assert_eq!(outgoing.recv().await.unwrap(), Packet::VersionQuery);
+                con.shutdown().await.unwrap();
+                assert!(matches!(
+                    outgoing.recv().await.unwrap(),
+                    Packet::Disconnect { .. }
+                ));
+            } else {
+                // Flush must succeed even while the outgoing queue is full.
+                con.flush().await.unwrap();
+                assert_eq!(outgoing.recv().await.unwrap(), Packet::VersionQuery);
+                outgoing.close();
+                let error = con.write(b"Z").await.unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+            assert!(outgoing.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn connection_outcome_rule_matches_failure() {
