@@ -502,6 +502,13 @@ struct ServerReceiveState {
     error: Option<Error>,
 }
 
+// Error can hold an opaque error source, which prevents automatic inference
+// of these traits. The receive state only stores and clones terminal errors.
+// It never invokes their sources, and a stored error prevents further reads.
+// Frame progress is updated after each read and reset before packet decoding.
+impl std::panic::UnwindSafe for ServerReceiveState {}
+impl std::panic::RefUnwindSafe for ServerReceiveState {}
+
 impl Default for ServerReceiveState {
     fn default() -> Self {
         Self {
@@ -685,6 +692,13 @@ pub struct AGWServerWriter {
 #[cfg(test)]
 mod split_server_tests {
     use super::*;
+
+    #[test]
+    fn server_readers_preserve_unwind_safety() {
+        fn assert_traits<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_traits::<AGWServer>();
+        assert_traits::<AGWServerReader>();
+    }
 
     // Poll once to consume available bytes, then cancel exactly at Pending.
     // This avoids relying on timeouts or scheduler timing to trigger cancellation.
